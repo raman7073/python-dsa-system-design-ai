@@ -1,0 +1,2 @@
+x="Joshua"
+print(x)

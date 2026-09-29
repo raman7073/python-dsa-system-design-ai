@@ -1,0 +1,12 @@
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+SQLAlchemy>=2.0,<3
+psycopg[binary]>=3.2,<4
+python-dotenv>=1.0,<2
+PyJWT>=2.10,<3
+pwdlib[argon2]>=0.2,<1
+cryptography>=44,<48
+python-multipart>=0.0.20,<1
+openpyxl>=3.1.5,<4
+defusedxml>=0.7,<1
+alembic>=1.14,<2

@@ -6,8 +6,8 @@ readme = "README.md"
 authors = [
     { name = "Raman Mehta", email = "raman.mehta@fiftyfivetech.io" }
 ]
-requires-python = ">=3.14,<3.15"
+requires-python = ">=3.13,<3.14"
 dependencies = [
     "fastapi[all]>=0.162.4",
-    "whisperx",
+    "whisperx>=3.8.4",
 ]

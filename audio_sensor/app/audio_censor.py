@@ -1,10 +1,21 @@
 import warnings
+from typing import NotRequired, TypedDict
+
+import whisperx
+from better_profanity import Profanity
 
 # pyannote (used by WhisperX for voice-activity detection) warns that torchcodec
 # can't load. Harmless: WhisperX hands it audio already decoded in memory.
-warnings.filterwarnings("ignore", message=r"\s*torchcodec is not installed correctly")
+warnings.filterwarnings(
+    "ignore", message=r"\s*torchcodec is not installed correctly")
 
-import whisperx
+
+class Word(TypedDict):
+    word: str
+    start: float
+    end: float
+    score: float
+    flagged: NotRequired[bool]  # True if the word is in the censor list
 
 
 class AudioCensor:
@@ -23,6 +34,13 @@ class AudioCensor:
         # int8 is the fastest compute type on CPU; float16 is GPU-only.
         self.compute_type = compute_type
         self.batch_size = batch_size
+
+        # better_profanity's built-in English word list plus our own censor
+        # words. A per-instance Profanity (instead of the module-level
+        # `profanity` singleton) keeps each AudioCensor's word list separate.
+        self._profanity = Profanity()
+        if censor_words:
+            self._profanity.add_censor_words(censor_words)
 
         # Models are loaded lazily on first use and reused across calls,
         # because loading them takes far longer than transcribing a short clip.
@@ -81,15 +99,38 @@ class AudioCensor:
         # The aligner returns numpy floats; convert them to plain Python floats
         # so the result is JSON-serializable (e.g. returned from FastAPI).
         return [
-            {key: float(val) if key != "word" else val for key, val in word.items()}
+            {key: float(val) if key != "word" else val for key,
+             val in word.items()}
             for word in aligned["word_segments"]
         ]
+
+    def detect_profanity(self, words: list[Word]) -> list[Word]:
+        """Set "flagged" on each word: True if it is profane or in the censor list.
+
+        Checks better_profanity's default word list plus `censor_words`.
+        Punctuation attached by the transcriber (e.g. "word.") is ignored, and
+        common obfuscations like "sh1t" are also caught. Updates the dicts in
+        place and returns the same list.
+        """
+        for word in words:
+            word["flagged"] = self._profanity.contains_profanity(word["word"])
+        return words
 
 
 # usage example (runs only when this file is executed directly, not on import):
 if __name__ == "__main__":
     censor = AudioCensor(censor_words=["badword1", "badword2"])
     words = censor.transcribe_audio(
-        r"C:\Users\Lenovo\Downloads\file_example_WAV_1MG.wav")
+        r"C:\Users\Lenovo\Downloads\freesound_community-fuck-36089.mp3")
+    words = censor.detect_profanity(words)
+    print(f"{'START':>7}  {'END':>7}  {'SCORE':>5}  {'FLAGGED':<7}  WORD")
     for w in words:
-        print(f"{w.get('start', '?'):>7} - {w.get('end', '?'):>7}  {w['word']}")
+        # A word the aligner couldn't place has no start/end/score.
+        start = f"{w['start']:.3f}" if "start" in w else "-"
+        end = f"{w['end']:.3f}" if "end" in w else "-"
+        score = f"{w['score']:.2f}" if "score" in w else "-"
+        flagged = "YES" if w["flagged"] else "no"
+        print(f"{start:>7}  {end:>7}  {score:>5}  {flagged:<7}  {w['word']}")
+
+    flagged_count = sum(w["flagged"] for w in words)
+    print(f"\n{len(words)} words, {flagged_count} flagged")

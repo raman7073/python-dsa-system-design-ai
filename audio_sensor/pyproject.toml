@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.13,<3.14"
 dependencies = [
+    "better-profanity>=0.7.0",
     "fastapi[all]>=0.162.4",
     "whisperx>=3.8.4",
 ]

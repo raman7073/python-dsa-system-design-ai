@@ -26,6 +26,9 @@ dist/
 .DS_Store
 Thumbs.db
 
+# Uploaded and censored audio (see STORAGE_DIR)
+storage/
+
 # Logs
 *.log
 

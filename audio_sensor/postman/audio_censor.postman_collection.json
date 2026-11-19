@@ -1,0 +1,351 @@
+{
+  "info": {
+    "name": "Audio Censor API",
+    "description": "Requests for the Audio Censor FastAPI app.\n\n**Before running:**\n1. Start the server: `uv run fastapi dev app/main.py` (from the `audio_sensor` folder).\n2. Wait for `Application startup complete`.\n3. If you run on a different port, change the `baseUrl` collection variable.\n\nThe `/censor` requests point at `C:\\Users\\Lenovo\\Downloads\\freesound_community-fuck-36089.mp3`. To use another file, open the request's **Body** tab and pick a file in the `file` row.\n\nUse **Send and Download** (arrow next to Send) to save the censored audio. Each request has checks in its **Tests** tab; results show in the response **Test Results** tab.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://127.0.0.1:8000",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Censor",
+      "item": [
+        {
+          "name": "Censor audio (mute)",
+          "request": {
+            "method": "POST",
+            "description": "Uploads an audio file; flagged words are replaced with silence. Returns the censored audio file.",
+            "url": {
+              "raw": "{{baseUrl}}/censor",
+              "host": ["{{baseUrl}}"],
+              "path": ["censor"]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "C:\\Users\\Lenovo\\Downloads\\freesound_community-fuck-36089.mp3",
+                  "description": "Audio file to censor (wav, mp3, flac, ogg, m4a, ...)."
+                },
+                {
+                  "key": "beep",
+                  "value": "false",
+                  "type": "text",
+                  "description": "false = silence flagged words."
+                },
+                {
+                  "key": "padding_ms",
+                  "value": "150",
+                  "type": "text",
+                  "description": "Extra ms muted on each side of a word (0-1000)."
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Response is audio', () => {",
+                  "    pm.expect(pm.response.headers.get('Content-Type')).to.match(/^audio\\//);",
+                  "});",
+                  "pm.test('Returned file is named *_censored.*', () => {",
+                  "    pm.expect(pm.response.headers.get('Content-Disposition')).to.include('_censored');",
+                  "});",
+                  "pm.test('Word counts are reported', () => {",
+                  "    const words = parseInt(pm.response.headers.get('X-Words-Count'), 10);",
+                  "    const flagged = parseInt(pm.response.headers.get('X-Flagged-Count'), 10);",
+                  "    pm.expect(words).to.be.at.least(0);",
+                  "    pm.expect(flagged).to.be.within(0, words);",
+                  "    console.log(`words=${words}, flagged=${flagged}`);",
+                  "});",
+                  "pm.test('Body is not empty', () => pm.expect(pm.response.responseSize).to.be.above(0));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Censor audio (beep)",
+          "request": {
+            "method": "POST",
+            "description": "Same as mute, but flagged words are replaced with a 1 kHz beep.",
+            "url": {
+              "raw": "{{baseUrl}}/censor",
+              "host": ["{{baseUrl}}"],
+              "path": ["censor"]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "C:\\Users\\Lenovo\\Downloads\\freesound_community-fuck-36089.mp3",
+                  "description": "Audio file to censor (wav, mp3, flac, ogg, m4a, ...)."
+                },
+                {
+                  "key": "beep",
+                  "value": "true",
+                  "type": "text",
+                  "description": "true = beep over flagged words."
+                },
+                {
+                  "key": "padding_ms",
+                  "value": "150",
+                  "type": "text",
+                  "description": "Extra ms censored on each side of a word (0-1000)."
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Response is audio', () => {",
+                  "    pm.expect(pm.response.headers.get('Content-Type')).to.match(/^audio\\//);",
+                  "});",
+                  "pm.test('Word counts are reported', () => {",
+                  "    const words = parseInt(pm.response.headers.get('X-Words-Count'), 10);",
+                  "    const flagged = parseInt(pm.response.headers.get('X-Flagged-Count'), 10);",
+                  "    pm.expect(flagged).to.be.within(0, words);",
+                  "    console.log(`words=${words}, flagged=${flagged}`);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Error: non-audio file (400)",
+          "request": {
+            "method": "POST",
+            "description": "Upload any file that isn't audio (e.g. a .txt or this collection's .json). Expects 400.\n\nPick the file in the Body tab's `file` row before sending.",
+            "url": {
+              "raw": "{{baseUrl}}/censor",
+              "host": ["{{baseUrl}}"],
+              "path": ["censor"]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Choose any non-audio file."
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 400', () => pm.response.to.have.status(400));",
+                  "pm.test('Error message explains the problem', () => {",
+                  "    pm.expect(pm.response.json().detail).to.eql('Could not decode the upload as audio.');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Error: upload too large (413)",
+          "request": {
+            "method": "POST",
+            "description": "Uploads a file bigger than the server's MAX_UPLOAD_MB limit (default 50 MB). Expects 413, and nothing is stored.\n\n**Easiest way to test:** restart the server with a 1 MB limit, then pick any file over 1 MB in the Body tab's `file` row:\n\n```powershell\n$env:MAX_UPLOAD_MB = \"1\"; uv run fastapi dev app/main.py\n```\n\nRemove the variable afterwards (`Remove-Item Env:MAX_UPLOAD_MB`) or open a new terminal to get the normal limit back.",
+            "url": {
+              "raw": "{{baseUrl}}/censor",
+              "host": ["{{baseUrl}}"],
+              "path": ["censor"]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Choose any file larger than MAX_UPLOAD_MB."
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 413', () => pm.response.to.have.status(413));",
+                  "pm.test('Error message states the limit', () => {",
+                  "    pm.expect(pm.response.json().detail).to.match(/^Upload exceeds \\d+ MB\\.$/);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Error: padding out of range (422)",
+          "request": {
+            "method": "POST",
+            "description": "padding_ms must be 0-1000; 5000 is rejected by validation before any processing.",
+            "url": {
+              "raw": "{{baseUrl}}/censor",
+              "host": ["{{baseUrl}}"],
+              "path": ["censor"]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "C:\\Users\\Lenovo\\Downloads\\freesound_community-fuck-36089.mp3"
+                },
+                {
+                  "key": "padding_ms",
+                  "value": "5000",
+                  "type": "text"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 422', () => pm.response.to.have.status(422));",
+                  "pm.test('Error points at padding_ms', () => {",
+                  "    const err = pm.response.json().detail[0];",
+                  "    pm.expect(err.loc).to.eql(['body', 'padding_ms']);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Error: missing file (422)",
+          "request": {
+            "method": "POST",
+            "description": "No file uploaded; expects a 422 validation error on `file`.",
+            "url": {
+              "raw": "{{baseUrl}}/censor",
+              "host": ["{{baseUrl}}"],
+              "path": ["censor"]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "beep",
+                  "value": "true",
+                  "type": "text"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 422', () => pm.response.to.have.status(422));",
+                  "pm.test('Error points at file', () => {",
+                  "    const err = pm.response.json().detail[0];",
+                  "    pm.expect(err.loc).to.eql(['body', 'file']);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Docs",
+      "item": [
+        {
+          "name": "Scalar API docs",
+          "request": {
+            "method": "GET",
+            "description": "HTML page; easier to open in a browser at {{baseUrl}}/scalar.",
+            "url": {
+              "raw": "{{baseUrl}}/scalar",
+              "host": ["{{baseUrl}}"],
+              "path": ["scalar"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Serves the Scalar page', () => pm.expect(pm.response.text()).to.include('Scalar'));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "OpenAPI schema",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/openapi.json",
+              "host": ["{{baseUrl}}"],
+              "path": ["openapi.json"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Documents POST /censor', () => {",
+                  "    pm.expect(pm.response.json().paths['/censor']).to.have.property('post');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    }
+  ]
+}

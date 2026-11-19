@@ -102,6 +102,9 @@ class ApiSettings(_EnvSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=30, gt=0)
 
     MAX_UPLOAD_MB: int = Field(default=50, gt=0)
+    # Sound effects (POST /sound-effects): short clips, so a small limit.
+    MAX_SOUND_EFFECT_MB: int = Field(default=2, gt=0)
+    MAX_SOUND_EFFECTS_PER_USER: int = Field(default=20, ge=1)
 
     # Abuse limits. A user may have this many jobs pending/processing at once
     # (each costs minutes of worker CPU); more uploads get 429 until one ends.
@@ -116,6 +119,10 @@ class ApiSettings(_EnvSettings):
     @property
     def max_upload_bytes(self) -> int:
         return self.MAX_UPLOAD_MB * 1024 * 1024
+
+    @property
+    def max_sound_effect_bytes(self) -> int:
+        return self.MAX_SOUND_EFFECT_MB * 1024 * 1024
 
 
 class WorkerSettings(_EnvSettings):

@@ -10,6 +10,7 @@ from app.database.models import User
 from app.database.session import get_session
 from app.security import InvalidTokenError, decode_access_token
 from app.service.audio_service import AudioService
+from app.service.sound_effect_service import SoundEffectService
 from app.service.user_service import UserService
 from app.worker.celery_app import enqueue_censor
 
@@ -26,6 +27,13 @@ def get_audio_service(session: SessionDep) -> AudioService:
 
 
 AudioServiceDep = Annotated[AudioService, Depends(get_audio_service)]
+
+
+def get_sound_effect_service(session: SessionDep) -> SoundEffectService:
+    return SoundEffectService(session)
+
+
+SoundEffectServiceDep = Annotated[SoundEffectService, Depends(get_sound_effect_service)]
 
 
 def get_user_service(session: SessionDep) -> UserService:

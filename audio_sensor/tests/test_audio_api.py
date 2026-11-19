@@ -3,7 +3,7 @@ from uuid import UUID
 
 import httpx
 
-from app.database.models import AudioFile, AudioStatus
+from app.database.models import AudioFile, AudioStatus, CensorMode
 from tests.helpers import (
     FakeQueue,
     MakeUser,
@@ -37,7 +37,7 @@ async def test_censor_stores_upload_and_queues_job(
     row = await get_audio_row(UUID(body["id"]))
     assert row is not None and row.user_id == user.id
     # Options live on the row, so a lost job can be queued again.
-    assert (row.padding_ms, row.beep) == (200, True)
+    assert (row.padding_ms, row.censor_mode) == (200, CensorMode.BEEP)
     assert row.queued_at is not None and row.attempts == 0
     assert row.file_path == f"uploads/{body['id']}.mp3"  # a key, not a path
     assert read_stored(row.file_path) == b"fake mp3 bytes"

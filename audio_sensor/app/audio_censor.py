@@ -1,8 +1,11 @@
 import logging
+import math
 import shutil
 import warnings
+from collections import OrderedDict
+from collections.abc import Sequence
 from pathlib import Path
-from typing import NotRequired, TypedDict
+from typing import NotRequired, TypedDict, cast
 
 import torch
 import whisperx
@@ -10,6 +13,13 @@ from better_profanity import Profanity
 from pydub import AudioSegment
 from pydub.exceptions import CouldntDecodeError
 from pydub.generators import Sine
+
+from app.censor_words import (  # noqa: F401 (re-exported)
+    MAX_CUSTOM_WORD_LENGTH,
+    MAX_CUSTOM_WORDS,
+    InvalidCustomWordsError,
+    normalize_custom_words,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +42,20 @@ class AudioDecodeError(ValueError):
     """The input file could not be decoded as audio."""
 
 
+class SoundEffectError(ValueError):
+    """The sound effect file could not be decoded as audio (or is empty)."""
+
+
+
+
 class AudioCensor:
-    """Transcribes audio, flags profanity, and mutes or beeps it out.
+    """Transcribes audio, flags profanity, and replaces it with silence, a
+    beep, or a sound effect.
+
+    Words flagged: better_profanity's built-in list, plus `censor_words` (for
+    every file this instance handles), plus any `custom_words` passed for one
+    file. One instance serves many users' files in turn, so per-file words
+    never change the shared list.
 
     Not thread-safe: use one instance per process (the Celery worker runs one
     job at a time per process). Models load on first use and are kept, since
@@ -45,8 +67,12 @@ class AudioCensor:
     # The classic broadcast "bleep": a 1 kHz sine tone.
     BEEP_FREQUENCY_HZ = 1000
     BEEP_VOLUME_DBFS = -20.0
-    # Short fade at each end of a beep so it doesn't click on/off.
+    # Short fade at each end of a beep or sound effect so it doesn't click
+    # on/off.
     BEEP_FADE_MS = 5
+    # Word lists for recently seen sets of custom words (users often reuse
+    # theirs). Building one takes a few milliseconds.
+    PROFANITY_CACHE_SIZE = 32
 
     def __init__(
         self,
@@ -78,6 +104,8 @@ class AudioCensor:
         self._profanity = Profanity()
         if self.censor_words:
             self._profanity.add_censor_words(self.censor_words)
+        # The same plus a file's custom words, keyed by those words.
+        self._custom_profanity: OrderedDict[frozenset[str], Profanity] = OrderedDict()
 
         # Loaded on first use and kept. The alignment model (word timestamps)
         # is only needed to mute something, so a worker that only ever sees
@@ -120,8 +148,15 @@ class AudioCensor:
         padding_ms: int = 150,
         beep: bool = False,
         copy_unchanged: bool = True,
+        custom_words: Sequence[str] | None = None,
+        sound_effect_path: str | None = None,
     ) -> tuple[str | None, list[Word]]:
-        """Full pipeline: transcribe, flag profanity, then mute or beep it.
+        """Full pipeline: transcribe, flag profanity, then replace it.
+
+        Each flagged word is replaced by silence, by a beep (`beep=True`), or
+        by the sound in `sound_effect_path` (looped or cut to fit). Besides
+        the built-in list, `custom_words` are censored in this file only
+        (validated by normalize_custom_words()).
 
         Returns (output_path, words), where `words` is every transcribed word
         with its "flagged" value. If nothing is flagged the audio is still
@@ -129,28 +164,87 @@ class AudioCensor:
         -- unless `copy_unchanged` is False: then, if the output would be an
         exact copy (same format), nothing is written and None is returned in
         place of the path, so the caller can reuse the original file.
-        Raises AudioDecodeError if the file isn't decodable audio.
+
+        Raises AudioDecodeError if the file isn't decodable audio,
+        SoundEffectError if the sound effect isn't, InvalidCustomWordsError
+        for a bad custom word list, and ValueError for both `beep` and a
+        sound effect.
 
         Word timestamps (the alignment step) are only needed to mute
-        something, so a clean transcript skips alignment and re-encoding.
+        something, so a clean transcript skips alignment and re-encoding, and
+        never decodes the sound effect.
         """
+        if beep and sound_effect_path:
+            raise ValueError("Use either beep or a sound effect, not both")
+        profanity = self._profanity_for(custom_words)
+
         audio = self._decode(audio_path)
         segments = self._transcribe(audio)
-        if not any(self._profanity.contains_profanity(s["text"]) for s in segments):
+        if not any(profanity.contains_profanity(s["text"]) for s in segments):
             # The whole-segment check is at least as strict as the per-word
             # one (it also catches multi-word censor phrases), so nothing
             # would have been flagged.
             words = [
                 Word(word=w, flagged=False) for s in segments for w in s["text"].split()
             ]
+        else:
+            words = self.detect_profanity(self._align(segments, audio), custom_words)
+        out = self.render_audio(
+            audio_path,
+            words,
+            output_path,
+            padding_ms=padding_ms,
+            beep=beep,
+            sound_effect_path=sound_effect_path,
+            copy_unchanged=copy_unchanged,
+        )
+        return out, words
+
+    def render_audio(
+        self,
+        audio_path: str,
+        words: list[Word],
+        output_path: str | None = None,
+        padding_ms: int = 150,
+        beep: bool = False,
+        sound_effect_path: str | None = None,
+        copy_unchanged: bool = True,
+    ) -> str | None:
+        """Write the censored audio for words already transcribed and flagged
+        (transcribe_audio, then detect_profanity).
+
+        Flagged words are replaced as in mute_audio(). With nothing flagged
+        the output is the input unchanged: copied (or converted, for another
+        format) -- or, if `copy_unchanged` is False and the format is the
+        same, not written at all, returning None so the caller can reuse the
+        original. Needs no models.
+        """
+        if not any(w.get("flagged") for w in words):
             out = self._output_path(audio_path, output_path)
             if not copy_unchanged and out.suffix.lower() == Path(audio_path).suffix.lower():
-                return None, words
-            return self._write_unchanged(audio_path, str(out)), words
+                return None
+            return self._write_unchanged(audio_path, str(out))
+        return self.mute_audio(
+            audio_path, words, output_path, padding_ms, beep, sound_effect_path
+        )
 
-        words = self.detect_profanity(self._align(segments, audio))
-        out = self.mute_audio(audio_path, words, output_path, padding_ms, beep)
-        return out, words
+    def _profanity_for(self, custom_words: Sequence[str] | None) -> Profanity:
+        """The word list for one file: the shared one, or the shared one plus
+        that file's custom words (built once per set of words, then cached)."""
+        words = normalize_custom_words(custom_words or ())
+        if not words:
+            return self._profanity
+        key = frozenset(words)
+        cached = self._custom_profanity.get(key)
+        if cached is not None:
+            self._custom_profanity.move_to_end(key)
+            return cached
+        profanity = Profanity()
+        profanity.add_censor_words([*self.censor_words, *words])
+        self._custom_profanity[key] = profanity
+        if len(self._custom_profanity) > self.PROFANITY_CACHE_SIZE:
+            self._custom_profanity.popitem(last=False)  # least recently used
+        return profanity
 
     def transcribe_audio(self, audio_path: str) -> list[Word]:
         """Transcribe English audio and force-align it for word-level timestamps.
@@ -221,16 +315,20 @@ class AudioCensor:
         audio.export(out, format=out.suffix.lstrip(".").lower() or "wav")
         return str(out)
 
-    def detect_profanity(self, words: list[Word]) -> list[Word]:
+    def detect_profanity(
+        self, words: list[Word], custom_words: Sequence[str] | None = None
+    ) -> list[Word]:
         """Set "flagged" on each word: True if it is profane or in the censor list.
 
-        Checks better_profanity's default word list plus `censor_words`.
-        Punctuation attached by the transcriber (e.g. "word.") is ignored, and
-        common obfuscations like "sh1t" are also caught. Updates the dicts in
-        place and returns the same list.
+        Checks better_profanity's default word list plus `censor_words`, plus
+        `custom_words` if given. Whole words only ("banana" doesn't flag
+        "bananas"). Punctuation attached by the transcriber (e.g. "word.") is
+        ignored, and common obfuscations like "sh1t" are also caught. Updates
+        the dicts in place and returns the same list.
         """
+        profanity = self._profanity_for(custom_words)
         for word in words:
-            word["flagged"] = self._profanity.contains_profanity(word["word"])
+            word["flagged"] = profanity.contains_profanity(word["word"])
         return words
 
     def mute_audio(
@@ -240,6 +338,7 @@ class AudioCensor:
         output_path: str | None = None,
         padding_ms: int = 150,
         beep: bool = False,
+        sound_effect_path: str | None = None,
     ) -> str:
         """Silence (or beep over) every flagged word in the audio and save it.
 
@@ -247,31 +346,32 @@ class AudioCensor:
         `padding_ms` on both sides: alignment timestamps aren't sample-exact,
         and the aligner often ends a word early, especially a shouted word
         ending in a hard consonant. With `beep=True` the span is replaced by
-        a 1 kHz tone instead of silence.
+        a 1 kHz tone instead of silence; with `sound_effect_path`, by that
+        sound, looped or cut to fit each span.
 
         `output_path` defaults to "<name>_censored<ext>" next to the input; the
         output format follows its extension (e.g. .wav, .mp3).
         Returns the output path.
         """
+        if beep and sound_effect_path:
+            raise ValueError("Use either beep or a sound effect, not both")
         try:
             audio = AudioSegment.from_file(audio_path)
         except CouldntDecodeError as exc:
             raise AudioDecodeError(f"Could not decode {audio_path!r} as audio") from exc
+        effect = self._load_effect(sound_effect_path, audio) if sound_effect_path else None
 
-        # Rebuild the audio from the clean parts with silence/beeps in between.
+        # Rebuild the audio from the clean parts with the filler in between.
         censored = AudioSegment.empty()
         cursor = 0
         for start_ms, end_ms in self._flagged_spans(words, padding_ms, len(audio)):
             censored += audio[cursor:start_ms] + self._make_filler(
-                audio, end_ms - start_ms, beep
+                audio, end_ms - start_ms, beep, effect
             )
             cursor = end_ms
         censored += audio[cursor:]
 
-        src = Path(audio_path)
-        out = Path(output_path) if output_path else src.with_name(
-            f"{src.stem}_censored{src.suffix}"
-        )
+        out = self._output_path(audio_path, output_path)
         censored.export(out, format=out.suffix.lstrip(".").lower() or "wav")
         return str(out)
 
@@ -304,12 +404,42 @@ class AudioCensor:
                 merged.append((start_ms, end_ms))
         return merged
 
-    def _make_filler(self, audio: AudioSegment, duration_ms: int, beep: bool) -> AudioSegment:
-        """Silence or a beep of `duration_ms`, matching `audio`'s format.
+    @staticmethod
+    def _load_effect(path: str, audio: AudioSegment) -> AudioSegment:
+        """The sound effect, converted once to `audio`'s format (frame rate,
+        channels, sample width) so every span joins without resampling."""
+        try:
+            effect = AudioSegment.from_file(path)
+        except CouldntDecodeError as exc:
+            raise SoundEffectError(f"Could not decode sound effect {path!r}") from exc
+        if len(effect) == 0:
+            raise SoundEffectError(f"Sound effect {path!r} is empty")
+        return (
+            effect.set_frame_rate(audio.frame_rate)
+            .set_channels(audio.channels)
+            .set_sample_width(audio.sample_width)
+        )
+
+    def _make_filler(
+        self,
+        audio: AudioSegment,
+        duration_ms: int,
+        beep: bool,
+        effect: AudioSegment | None = None,
+    ) -> AudioSegment:
+        """Silence, a beep, or the sound effect, `duration_ms` long, matching
+        `audio`'s format.
 
         Same frame rate, channels and sample width as the source, so the
-        pieces join without resampling.
+        pieces join without resampling. A sound effect shorter than the span
+        is repeated, a longer one cut, and it fades in and out like the beep.
         """
+        if effect is not None:
+            repeats = math.ceil(duration_ms / len(effect))
+            # cast: pydub's stubs type slicing as a generator.
+            filler = cast(AudioSegment, (effect * repeats)[:duration_ms])
+            fade = min(self.BEEP_FADE_MS, duration_ms // 2)
+            return filler.fade_in(fade).fade_out(fade)
         if beep:
             filler = Sine(
                 self.BEEP_FREQUENCY_HZ,

@@ -12,7 +12,13 @@ from sqlalchemy.pool import NullPool
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.config import settings
-from app.database.models import AudioFile, AudioStatus
+from app.database.models import (
+    AudioFile,
+    AudioStatus,
+    AudioTranscript,
+    JobStage,
+    SoundEffect,
+)
 from app.security import create_access_token
 from app.storage import censored_key, get_storage, upload_key
 
@@ -27,12 +33,15 @@ class FakeQueue:
     """Stands in for app.worker.celery_app.enqueue_censor."""
 
     jobs: list[UUID] = field(default_factory=list)
+    # The stage each queued job runs after (None: all steps).
+    after: list[JobStage | None] = field(default_factory=list)
     available: bool = True  # False simulates Redis being unreachable
 
-    def __call__(self, audio_id: UUID) -> None:
+    def __call__(self, audio_id: UUID, after: JobStage | None = None) -> None:
         if not self.available:
             raise ConnectionError("Redis is unreachable (FakeQueue)")
         self.jobs.append(audio_id)
+        self.after.append(after)
 
 
 @dataclass
@@ -111,3 +120,40 @@ class InMemoryRateLimiter:
     async def hit(self, key: str, limit: int, window_seconds: int) -> int | None:
         self.counts[key] = self.counts.get(key, 0) + 1
         return window_seconds if self.counts[key] > limit else None
+
+
+async def update_audio_row(audio_id: UUID, **fields: Any) -> None:
+    """Change fields of an audio row directly (e.g. to set up a re-run)."""
+    async with helper_sessions() as s:
+        record = await s.get(AudioFile, audio_id)
+        assert record is not None
+        for name, value in fields.items():
+            setattr(record, name, value)
+        s.add(record)
+        await s.commit()
+
+
+async def get_transcript_words(audio_id: UUID) -> list[dict] | None:
+    async with helper_sessions() as s:
+        transcript = await s.get(AudioTranscript, audio_id)
+        return transcript.words if transcript else None
+
+
+async def make_transcript(audio_id: UUID, words: list[dict]) -> None:
+    async with helper_sessions() as s:
+        s.add(AudioTranscript(audio_id=audio_id, words=words))
+        await s.commit()
+
+
+async def make_sound_effect(
+    owner_id: UUID | None, content: bytes = b"effect audio", name: str = "airhorn"
+) -> SoundEffect:
+    """Insert a sound effect row and store its file."""
+    effect_id = uuid4()
+    key = f"effects/{effect_id}.wav"
+    get_storage().save(key, io.BytesIO(content), max_bytes=10**9)
+    effect = SoundEffect(id=effect_id, user_id=owner_id, name=name, file_path=key)
+    async with helper_sessions() as s:
+        s.add(effect)
+        await s.commit()
+    return effect

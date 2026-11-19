@@ -1,3 +1,5 @@
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -13,29 +15,80 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import FileResponse, StreamingResponse
-from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
-from starlette.types import Receive, Scope, Send
+from fastapi.responses import FileResponse
 
 from app.api.dependencies import AudioServiceDep, CurrentUserDep
 from app.api.pagination import decode_cursor, encode_cursor
 from app.api.rate_limit import limit_censor
-from app.api.schemas import AudioRead
+from app.api.responses import download_response
+from app.api.schemas import AudioRead, AudioSettingsUpdate
+from app.censor_words import MAX_CUSTOM_WORDS, InvalidCustomWordsError
 from app.config import get_api_settings
+from app.database.models import AudioStatus, CensorMode
 from app.service.audio_service import (
+    MAX_PADDING_MS,
     AudioNotFoundError,
     AudioNotReadyError,
     AudioVariant,
+    InvalidSettingsError,
+    JobBusyError,
     QueueUnavailableError,
+    RerunNotPossibleError,
+    SoundEffectNotFoundError,
     TooManyActiveJobsError,
 )
-from app.storage import Download, UploadTooLargeError
+from app.storage import UploadTooLargeError
 
 # Every route here requires a bearer token (`user: CurrentUserDep`), and users
 # only ever see their own audio.
-UNAUTHORIZED: dict[int | str, dict[str, Any]] = {401: {"description": "Missing, invalid or expired token."}}
+UNAUTHORIZED: dict[int | str, dict[str, Any]] = {
+    401: {"description": "Missing, invalid or expired token."}
+}
 
 router = APIRouter(tags=["censor"], responses=UNAUTHORIZED)
+
+INVALID_SETTINGS = (
+    "Invalid settings: bad custom words, a sound effect that isn't yours or "
+    "doesn't exist, or censor_mode and sound_effect_id that don't fit together."
+)
+TOO_MANY = (
+    "Too many requests: either the hourly rate limit, or "
+    f"{get_api_settings().MAX_ACTIVE_JOBS_PER_USER} jobs already in progress (wait for one "
+    "to finish). See `Retry-After`."
+)
+
+
+@contextmanager
+def _http_errors() -> Iterator[None]:
+    """Turn AudioService errors into HTTP responses (shared by the routes)."""
+    try:
+        yield
+    except UploadTooLargeError as exc:
+        raise HTTPException(
+            413, f"Upload exceeds {get_api_settings().MAX_UPLOAD_MB} MB."
+        ) from exc
+    except (
+        InvalidCustomWordsError,
+        InvalidSettingsError,
+        SoundEffectNotFoundError,
+    ) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except AudioNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (JobBusyError, RerunNotPossibleError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except TooManyActiveJobsError as exc:
+        raise HTTPException(
+            429,
+            f"You already have {exc.limit} audio files being censored; "
+            "wait for one to finish.",
+            # A short job takes about a minute; this is only a hint.
+            headers={"Retry-After": "60"},
+        ) from exc
+    except QueueUnavailableError as exc:
+        raise HTTPException(
+            503, "The censor queue is unavailable; try again later."
+        ) from exc
 
 
 @router.post(
@@ -52,12 +105,11 @@ router = APIRouter(tags=["censor"], responses=UNAUTHORIZED)
             "`failed` with an `error`.",
             "headers": {"Location": {"description": "URL of the new audio record."}},
         },
-        413: {"description": f"The upload exceeds {get_api_settings().MAX_UPLOAD_MB} MB."},
-        429: {
-            "description": "Too many uploads: either the hourly rate limit, or "
-            f"{get_api_settings().MAX_ACTIVE_JOBS_PER_USER} jobs already in progress (wait for one "
-            "to finish). See `Retry-After`.",
+        413: {
+            "description": f"The upload exceeds {get_api_settings().MAX_UPLOAD_MB} MB."
         },
+        422: {"description": INVALID_SETTINGS + " Nothing was stored."},
+        429: {"description": TOO_MANY},
         503: {"description": "The job queue is unavailable; nothing was stored."},
     },
 )
@@ -66,34 +118,62 @@ async def censor_endpoint(
     service: AudioServiceDep,
     request: Request,
     response: Response,
-    file: Annotated[UploadFile, File(description="Audio file (wav, mp3, flac, ogg, m4a, ...).")],
+    file: Annotated[
+        UploadFile, File(description="Audio file (wav, mp3, flac, ogg, m4a, ...).")
+    ],
+    censor_mode: Annotated[
+        CensorMode | None,
+        Form(
+            description="What replaces flagged words: mute (default), beep, or "
+            "sound_effect (with sound_effect_id)."
+        ),
+    ] = None,
+    custom_words: Annotated[
+        list[str] | None,
+        Form(
+            description="An extra word to censor on top of the built-in list; send the "
+            f"field once per word (at most {MAX_CUSTOM_WORDS}). Single words only "
+            "(letters, digits, ' and -). Whole words: 'banana' doesn't catch 'bananas'."
+        ),
+    ] = None,
+    sound_effect_id: Annotated[
+        UUID | None,
+        Form(
+            description="Your own sound effect or a built-in one, for censor_mode "
+            "sound_effect."
+        ),
+    ] = None,
     beep: Annotated[
-        bool, Form(description="Beep over flagged words instead of silencing them.")
+        bool, Form(description="Same as censor_mode=beep (kept for older clients).")
     ] = False,
     padding_ms: Annotated[
-        int, Form(ge=0, le=1000, description="Extra milliseconds muted on each side of a word.")
+        int,
+        Form(
+            ge=0,
+            le=MAX_PADDING_MS,
+            description="Extra milliseconds censored on each side of a word.",
+        ),
     ] = 150,
 ) -> AudioRead:
     # Only stores the upload and queues the job; a Celery worker does the
     # slow transcription and censoring (app.worker.tasks).
-    try:
+    mode = censor_mode or (CensorMode.BEEP if beep else CensorMode.MUTE)
+    if beep and mode != CensorMode.BEEP:
+        raise HTTPException(422, f"beep=true contradicts censor_mode={mode}.")
+    with _http_errors():
         record = await service.submit_upload(
-            user.id, file.filename, file.file, padding_ms=padding_ms, beep=beep
+            user.id,
+            file.filename,
+            file.file,
+            padding_ms=padding_ms,
+            censor_mode=mode,
+            custom_words=custom_words or (),
+            sound_effect_id=sound_effect_id,
         )
-    except UploadTooLargeError as exc:
-        raise HTTPException(413, f"Upload exceeds {get_api_settings().MAX_UPLOAD_MB} MB.") from exc
-    except TooManyActiveJobsError as exc:
-        raise HTTPException(
-            429,
-            f"You already have {exc.limit} audio files being censored; "
-            "wait for one to finish.",
-            # A short job takes about a minute; this is only a hint.
-            headers={"Retry-After": "60"},
-        ) from exc
-    except QueueUnavailableError as exc:
-        raise HTTPException(503, "The censor queue is unavailable; try again later.") from exc
 
-    response.headers["Location"] = str(request.url_for("read_audio", audio_id=record.id))
+    response.headers["Location"] = str(
+        request.url_for("read_audio", audio_id=record.id)
+    )
     return AudioRead.from_record(record, request)
 
 
@@ -111,7 +191,9 @@ async def censor_endpoint(
                 }
             }
         },
-        422: {"description": "Invalid `before` cursor, or `before` used with `offset`."},
+        422: {
+            "description": "Invalid `before` cursor, or `before` used with `offset`."
+        },
     },
 )
 async def list_audio(
@@ -142,7 +224,9 @@ async def list_audio(
         except ValueError as exc:
             raise HTTPException(422, "Invalid `before` cursor.") from exc
 
-    records = await service.list_audios(user.id, limit=limit, offset=offset, before=cursor)
+    records = await service.list_audios(
+        user.id, limit=limit, offset=offset, before=cursor
+    )
     if len(records) == limit:
         response.headers["X-Next-Cursor"] = encode_cursor(records[-1])
     return [AudioRead.from_record(record, request) for record in records]
@@ -165,6 +249,52 @@ async def read_audio(
     return AudioRead.from_record(record, request)
 
 
+@router.patch(
+    "/audio/{audio_id}",
+    tags=["audio"],
+    summary="Change a job's censor settings and re-run it",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=AudioRead,
+    # A re-run uses the worker like an upload, so it shares /censor's budget.
+    dependencies=[Depends(limit_censor)],
+    responses={
+        200: {"description": "Nothing changed: the settings were already these."},
+        202: {
+            "description": "Queued (`status`: pending). New custom words re-run "
+            "detection and rendering; any other change re-runs rendering only. The "
+            "audio isn't transcribed again. Poll GET /audio/{id} as after an upload."
+        },
+        404: {"description": "No audio with this ID among your uploads."},
+        409: {
+            "description": "The job is still pending or processing, or it has no "
+            "stored transcript to re-run from (it failed before transcription, or "
+            "ran before transcripts were kept: upload it again)."
+        },
+        422: {"description": INVALID_SETTINGS},
+        429: {"description": TOO_MANY},
+        503: {"description": "The job queue is unavailable; nothing was changed."},
+    },
+)
+async def update_audio_settings(
+    audio_id: UUID,
+    body: AudioSettingsUpdate,
+    user: CurrentUserDep,
+    service: AudioServiceDep,
+    request: Request,
+    response: Response,
+) -> AudioRead:
+    """Send only the settings to change; the rest keep their current value."""
+    with _http_errors():
+        # exclude_none: null means "keep" (an empty custom_words list still
+        # goes through, and removes the words).
+        record = await service.update_settings(
+            audio_id, user.id, **body.model_dump(exclude_none=True)
+        )
+    if record.status != AudioStatus.PENDING:
+        response.status_code = status.HTTP_200_OK  # nothing changed, nothing queued
+    return AudioRead.from_record(record, request)
+
+
 @router.get(
     "/audio/{audio_id}/file",
     name="read_audio_file",
@@ -173,8 +303,12 @@ async def read_audio(
     response_class=FileResponse,
     responses={
         200: {"description": "The censored file (default) or the original upload."},
-        404: {"description": "No audio with this ID among your uploads, or its file is missing."},
-        409: {"description": "The censored file isn't ready: the job is still running, or failed."},
+        404: {
+            "description": "No audio with this ID among your uploads, or its file is missing."
+        },
+        409: {
+            "description": "The censored file isn't ready: the job is still running, or failed."
+        },
     },
 )
 async def read_audio_file(
@@ -192,35 +326,4 @@ async def read_audio_file(
     except AudioNotReadyError as exc:
         raise HTTPException(409, str(exc)) from exc
 
-    if stored.download.path is not None:
-        return FileResponse(
-            stored.download.path, media_type=stored.media_type, filename=stored.download_filename
-        )
-    # Object storage: stream it through, so download links stay behind login.
-    headers = {"Content-Disposition": f'attachment; filename="{stored.download_filename}"'}
-    if stored.download.size is not None:
-        headers["Content-Length"] = str(stored.download.size)
-    return ClosingStreamingResponse(
-        stored.download, media_type=stored.media_type, headers=headers
-    )
-
-
-class ClosingStreamingResponse(StreamingResponse):
-    """Streams a Download and always closes it afterwards.
-
-    Closing inside the chunk generator isn't enough: when the client
-    disconnects, Starlette abandons the generator mid-stream without closing
-    it, and its background tasks are skipped too. Wrapping the whole response
-    covers every ending: finished, failed, or disconnected.
-    """
-
-    def __init__(self, download: Download, **kwargs: Any):
-        super().__init__(iterate_in_threadpool(download.chunks or iter(())), **kwargs)
-        self._close = download.close
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        try:
-            await super().__call__(scope, receive, send)
-        finally:
-            if self._close is not None:
-                await run_in_threadpool(self._close)
+    return download_response(stored.download, stored.media_type, stored.download_filename)

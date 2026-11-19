@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Audio Censor API",
-    "description": "Requests for the Audio Censor FastAPI app.\n\n**Before running:**\n1. Start Redis and the Celery worker: `docker compose up -d --build` (from the `audio_sensor` folder).\n2. Start the server: `uv run fastapi dev app/main.py` and wait for `Application startup complete`.\n3. If you run on a different port, change the `baseUrl` collection variable.\n\nThe `/censor` requests point at `C:\\Users\\Lenovo\\Downloads\\freesound_community-fuck-36089.mp3`. To use another file, open the request's **Body** tab and pick a file in the `file` row.\n\nFolders run in order: **Auth** signs up a fresh user and logs in (saving `accessToken`); **Censor** and **Audio** send that token, and **Censor** saves the new record's ID as `audioId` for **Audio**. `/censor` and `/audio/*` require login.\n\n`/censor` returns **202** straight away and the worker censors in the background; **Audio → Wait until processed** polls until it's done (automatic in the **Collection Runner**). Then use **Send and Download** on **Download censored file** to save the audio. Each request has checks in its **Tests** tab; results show in the response **Test Results** tab.",
+    "description": "Requests for the Audio Censor FastAPI app.\n\n**Before running:**\n1. Start Redis and the Celery worker: `docker compose up -d --build` (from the `audio_sensor` folder).\n2. Start the server: `uv run fastapi dev app/main.py` and wait for `Application startup complete`.\n3. If you run on a different port, change the `baseUrl` collection variable.\n\nThe `/censor` requests point at `C:\\Users\\Lenovo\\Downloads\\freesound_community-fuck-36089.mp3`. To use another file, open the request's **Body** tab and pick a file in the `file` row.\n\nFolders run in order: **Auth** signs up a fresh user and logs in (saving `accessToken`); **Censor**, **Audio** and **Sound effects** send that token, and **Censor** saves the new record's ID as `audioId` for **Audio**. `/censor` and `/audio/*` require login.\n\n`/censor` returns **202** straight away and the worker censors in the background; **Audio → Wait until processed** polls until it's done (automatic in the **Collection Runner**). Then use **Send and Download** on **Download censored file** to save the audio. Each request has checks in its **Tests** tab; results show in the response **Test Results** tab.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -43,6 +43,16 @@
     {
       "key": "pollCount",
       "value": "0",
+      "type": "string"
+    },
+    {
+      "key": "effectId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "effectAudioId",
+      "value": "",
       "type": "string"
     }
   ],
@@ -757,7 +767,7 @@
           "name": "Censor audio (mute)",
           "request": {
             "method": "POST",
-            "description": "Uploads an audio file; flagged words are replaced with silence. Returns the censored audio file.",
+            "description": "Uploads audio with censor_mode=mute and one custom word to censor on top of the built-in list (send `custom_words` once per word). Returns 202: the job is queued.",
             "url": {
               "raw": "{{baseUrl}}/censor",
               "host": [
@@ -773,20 +783,22 @@
                 {
                   "key": "file",
                   "type": "file",
-                  "src": "C:\\Users\\Lenovo\\Downloads\\freesound_community-fuck-36089.mp3",
-                  "description": "Audio file to censor (wav, mp3, flac, ogg, m4a, ...)."
+                  "src": "C:\\Users\\Lenovo\\Downloads\\freesound_community-fuck-36089.mp3"
                 },
                 {
-                  "key": "beep",
-                  "value": "false",
-                  "type": "text",
-                  "description": "false = silence flagged words."
+                  "key": "censor_mode",
+                  "value": "mute",
+                  "type": "text"
+                },
+                {
+                  "key": "custom_words",
+                  "value": "Heck",
+                  "type": "text"
                 },
                 {
                   "key": "padding_ms",
                   "value": "150",
-                  "type": "text",
-                  "description": "Extra ms muted on each side of a word (0-1000)."
+                  "type": "text"
                 }
               ]
             }
@@ -800,7 +812,7 @@
                   "pm.test('Status is 202 Accepted', () => pm.response.to.have.status(202));",
                   "const body = pm.response.json();",
                   "pm.test('Job is queued as pending', () => {",
-                  "    pm.expect(body).to.have.all.keys('id', 'status', 'created_at', 'finished_at', 'words_count', 'flagged_count', 'error', 'censored_url', 'original_url');",
+                  "    pm.expect(body).to.have.all.keys('id', 'status', 'created_at', 'finished_at', 'words_count', 'flagged_count', 'error', 'stage', 'censor_mode', 'sound_effect_id', 'custom_words', 'padding_ms', 'censored_url', 'original_url');",
                   "    pm.expect(body.status).to.eql('pending');",
                   "    pm.expect(body.censored_url).to.eql(null);",
                   "});",
@@ -808,7 +820,11 @@
                   "    pm.expect(pm.response.headers.get('Location')).to.match(new RegExp(`/audio/${body.id}$`));",
                   "});",
                   "pm.collectionVariables.set('audioId', body.id);",
-                  "pm.collectionVariables.set('pollCount', '0');"
+                  "pm.collectionVariables.set('pollCount', '0');",
+                  "pm.test('Settings stored (custom words normalized)', () => {",
+                  "    pm.expect(body.censor_mode).to.eql('mute');",
+                  "    pm.expect(body.custom_words).to.eql(['heck']);",
+                  "});"
                 ]
               }
             }
@@ -819,7 +835,7 @@
           "name": "Censor audio (beep)",
           "request": {
             "method": "POST",
-            "description": "Same as mute, but flagged words are replaced with a 1 kHz beep.",
+            "description": "Uploads audio with the older `beep=true` flag (same as censor_mode=beep). Returns 202.",
             "url": {
               "raw": "{{baseUrl}}/censor",
               "host": [
@@ -862,7 +878,7 @@
                   "pm.test('Status is 202 Accepted', () => pm.response.to.have.status(202));",
                   "const body = pm.response.json();",
                   "pm.test('Job is queued as pending', () => {",
-                  "    pm.expect(body).to.have.all.keys('id', 'status', 'created_at', 'finished_at', 'words_count', 'flagged_count', 'error', 'censored_url', 'original_url');",
+                  "    pm.expect(body).to.have.all.keys('id', 'status', 'created_at', 'finished_at', 'words_count', 'flagged_count', 'error', 'stage', 'censor_mode', 'sound_effect_id', 'custom_words', 'padding_ms', 'censored_url', 'original_url');",
                   "    pm.expect(body.status).to.eql('pending');",
                   "    pm.expect(body.censored_url).to.eql(null);",
                   "});",
@@ -870,7 +886,8 @@
                   "    pm.expect(pm.response.headers.get('Location')).to.match(new RegExp(`/audio/${body.id}$`));",
                   "});",
                   "pm.collectionVariables.set('audioId', body.id);",
-                  "pm.collectionVariables.set('pollCount', '0');"
+                  "pm.collectionVariables.set('pollCount', '0');",
+                  "pm.test('beep=true means censor_mode beep', () => pm.expect(body.censor_mode).to.eql('beep'));"
                 ]
               }
             }
@@ -967,7 +984,7 @@
                   "pm.test('Status is 202 Accepted', () => pm.response.to.have.status(202));",
                   "const body = pm.response.json();",
                   "pm.test('Job is queued as pending', () => {",
-                  "    pm.expect(body).to.have.all.keys('id', 'status', 'created_at', 'finished_at', 'words_count', 'flagged_count', 'error', 'censored_url', 'original_url');",
+                  "    pm.expect(body).to.have.all.keys('id', 'status', 'created_at', 'finished_at', 'words_count', 'flagged_count', 'error', 'stage', 'censor_mode', 'sound_effect_id', 'custom_words', 'padding_ms', 'censored_url', 'original_url');",
                   "    pm.expect(body.status).to.eql('pending');",
                   "    pm.expect(body.censored_url).to.eql(null);",
                   "});",
@@ -1112,6 +1129,94 @@
             }
           ],
           "response": []
+        },
+        {
+          "name": "Error: phrase as custom word (422)",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{baseUrl}}/censor",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "censor"
+              ]
+            },
+            "description": "Only single words can be censored. Checked before anything is stored.",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "C:\\Users\\Lenovo\\Downloads\\freesound_community-fuck-36089.mp3"
+                },
+                {
+                  "key": "custom_words",
+                  "value": "ice cream",
+                  "type": "text"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 422', () => pm.response.to.have.status(422));",
+                  "pm.test('Says why', () => pm.expect(pm.response.json().detail).to.include('single words'));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Error: sound_effect mode without an effect (422)",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{baseUrl}}/censor",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "censor"
+              ]
+            },
+            "description": "censor_mode=sound_effect needs a sound_effect_id.",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "C:\\Users\\Lenovo\\Downloads\\freesound_community-fuck-36089.mp3"
+                },
+                {
+                  "key": "censor_mode",
+                  "value": "sound_effect",
+                  "type": "text"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 422', () => pm.response.to.have.status(422));",
+                  "pm.test('Says why', () => pm.expect(pm.response.json().detail).to.include('Choose a sound effect'));"
+                ]
+              }
+            }
+          ],
+          "response": []
         }
       ],
       "auth": {
@@ -1223,7 +1328,7 @@
                   "const body = pm.response.json();",
                   "pm.test('Returns a list of records', () => {",
                   "    pm.expect(body).to.be.an('array');",
-                  "    body.forEach(r => pm.expect(r).to.have.all.keys('id', 'status', 'created_at', 'finished_at', 'words_count', 'flagged_count', 'error', 'censored_url', 'original_url'));",
+                  "    body.forEach(r => pm.expect(r).to.have.all.keys('id', 'status', 'created_at', 'finished_at', 'words_count', 'flagged_count', 'error', 'stage', 'censor_mode', 'sound_effect_id', 'custom_words', 'padding_ms', 'censored_url', 'original_url'));",
                   "});",
                   "pm.test('Includes the last censored audio', () => {",
                   "    pm.expect(body.map(r => r.id)).to.include(pm.collectionVariables.get('audioId'));",
@@ -1266,7 +1371,7 @@
                   "pm.test('Status is 200', () => pm.response.to.have.status(200));",
                   "const body = pm.response.json();",
                   "pm.test('Has the job fields and download URLs', () => {",
-                  "    pm.expect(body).to.have.all.keys('id', 'status', 'created_at', 'finished_at', 'words_count', 'flagged_count', 'error', 'censored_url', 'original_url');",
+                  "    pm.expect(body).to.have.all.keys('id', 'status', 'created_at', 'finished_at', 'words_count', 'flagged_count', 'error', 'stage', 'censor_mode', 'sound_effect_id', 'custom_words', 'padding_ms', 'censored_url', 'original_url');",
                   "    pm.expect(body.id).to.eql(pm.collectionVariables.get('audioId'));",
                   "});",
                   "pm.test('URLs point at the file endpoint', () => {",
@@ -1359,6 +1464,179 @@
           "response": []
         },
         {
+          "name": "Change settings: add a custom word (202)",
+          "request": {
+            "method": "PATCH",
+            "url": {
+              "raw": "{{baseUrl}}/audio/{{audioId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "audio",
+                "{{audioId}}"
+              ]
+            },
+            "description": "New custom words re-run detection and rendering; the stored transcript is reused, so nothing is transcribed again. Other settings (censor_mode, sound_effect_id, padding_ms) re-run rendering only.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"custom_words\": [\n    \"hello\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 202', () => pm.response.to.have.status(202));",
+                  "const body = pm.response.json();",
+                  "pm.test('Queued again from detection', () => {",
+                  "    pm.expect(body.status).to.eql('pending');",
+                  "    pm.expect(body.stage).to.eql('transcribed');",
+                  "    pm.expect(body.custom_words).to.eql(['hello']);",
+                  "    pm.expect(body.censored_url).to.eql(null);",
+                  "});",
+                  "pm.collectionVariables.set('pollCount', '0');"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Wait until re-processed",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/audio/{{audioId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "audio",
+                "{{audioId}}"
+              ]
+            },
+            "description": "Polls until the job finishes (automatic in the Collection Runner; by hand, press Send again until `status` changes)."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const polls = parseInt(pm.collectionVariables.get('pollCount') || '0', 10);",
+                  "if (polls > 0) setTimeout(() => {}, 3000);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "const polls = parseInt(pm.collectionVariables.get('pollCount') || '0', 10);",
+                  "if (['pending', 'processing'].includes(body.status) && polls < 200) {",
+                  "    pm.collectionVariables.set('pollCount', String(polls + 1));",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
+                  "    return;",
+                  "}",
+                  "pm.collectionVariables.set('pollCount', '0');",
+                  "pm.test('Job ended as completed', () => pm.expect(body.status).to.eql('completed'));",
+                  "pm.test('New words applied', () => pm.expect(body.custom_words).to.eql(['hello']));",
+                  "pm.test('Rendered again', () => pm.expect(body.stage).to.eql('rendered'));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Change settings: nothing different (200)",
+          "request": {
+            "method": "PATCH",
+            "url": {
+              "raw": "{{baseUrl}}/audio/{{audioId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "audio",
+                "{{audioId}}"
+              ]
+            },
+            "description": "The same words (case doesn't matter): nothing is queued.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"custom_words\": [\n    \"HELLO\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Still completed', () => pm.expect(pm.response.json().status).to.eql('completed'));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Error: change settings, unknown field (422)",
+          "request": {
+            "method": "PATCH",
+            "url": {
+              "raw": "{{baseUrl}}/audio/{{audioId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "audio",
+                "{{audioId}}"
+              ]
+            },
+            "description": "Unknown fields are refused rather than ignored.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"beep\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 422', () => pm.response.to.have.status(422));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
           "name": "Wait for failed job",
           "request": {
             "method": "GET",
@@ -1442,6 +1720,45 @@
                 "exec": [
                   "pm.test('Status is 409', () => pm.response.to.have.status(409));",
                   "pm.test('Says the job failed', () => pm.expect(pm.response.json().detail).to.include('failed'));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Error: re-run a job that failed before transcription (409)",
+          "request": {
+            "method": "PATCH",
+            "url": {
+              "raw": "{{baseUrl}}/audio/{{failedAudioId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "audio",
+                "{{failedAudioId}}"
+              ]
+            },
+            "description": "It has no stored transcript to re-run from: upload the file again.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"censor_mode\": \"beep\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 409', () => pm.response.to.have.status(409));",
+                  "pm.test('Says why', () => pm.expect(pm.response.json().detail).to.include('transcript'));"
                 ]
               }
             }
@@ -1586,6 +1903,369 @@
           }
         ]
       }
+    },
+    {
+      "name": "Sound effects",
+      "description": "Upload your own sound effects (or use built-in ones) to replace censored words: POST /censor or PATCH /audio/{id} with censor_mode=sound_effect and the effect's id. Requires login. The upload here uses the same file as the Censor folder; pick any short clip in the file row.",
+      "auth": {
+        "type": "bearer",
+        "bearer": [
+          {
+            "key": "token",
+            "value": "{{accessToken}}",
+            "type": "string"
+          }
+        ]
+      },
+      "item": [
+        {
+          "name": "Upload sound effect",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{baseUrl}}/sound-effects",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sound-effects"
+              ]
+            },
+            "description": "A short clip (wav, mp3, flac, ogg, m4a, aac, opus, webm; at most 2 MB). Names are unique among your effects.",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "C:\\Users\\Lenovo\\Downloads\\freesound_community-fuck-36089.mp3"
+                },
+                {
+                  "key": "name",
+                  "value": "airhorn",
+                  "type": "text"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 201', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test('Your own effect', () => {",
+                  "    pm.expect(body).to.have.all.keys('id', 'name', 'built_in', 'created_at', 'file_url');",
+                  "    pm.expect(body.name).to.eql('airhorn');",
+                  "    pm.expect(body.built_in).to.eql(false);",
+                  "});",
+                  "pm.collectionVariables.set('effectId', body.id);"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "List sound effects",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/sound-effects",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sound-effects"
+              ]
+            },
+            "description": "Built-in effects first, then yours."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Includes the uploaded effect', () => {",
+                  "    pm.expect(pm.response.json().map(e => e.id)).to.include(pm.collectionVariables.get('effectId'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Download sound effect",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/sound-effects/{{effectId}}/file",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sound-effects",
+                "{{effectId}}",
+                "file"
+              ]
+            },
+            "description": "To preview it."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Response is audio', () => pm.expect(pm.response.headers.get('Content-Type')).to.match(/^audio\\//));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Error: duplicate name (409)",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{baseUrl}}/sound-effects",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sound-effects"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "C:\\Users\\Lenovo\\Downloads\\freesound_community-fuck-36089.mp3"
+                },
+                {
+                  "key": "name",
+                  "value": "airhorn",
+                  "type": "text"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 409', () => pm.response.to.have.status(409));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Censor with the sound effect",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{baseUrl}}/censor",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "censor"
+              ]
+            },
+            "description": "Each censored word is replaced by the effect (repeated or cut to fit).",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "C:\\Users\\Lenovo\\Downloads\\freesound_community-fuck-36089.mp3"
+                },
+                {
+                  "key": "censor_mode",
+                  "value": "sound_effect",
+                  "type": "text"
+                },
+                {
+                  "key": "sound_effect_id",
+                  "value": "{{effectId}}",
+                  "type": "text"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 202', () => pm.response.to.have.status(202));",
+                  "const body = pm.response.json();",
+                  "pm.test('Uses the effect', () => {",
+                  "    pm.expect(body.censor_mode).to.eql('sound_effect');",
+                  "    pm.expect(body.sound_effect_id).to.eql(pm.collectionVariables.get('effectId'));",
+                  "});",
+                  "pm.collectionVariables.set('effectAudioId', body.id);",
+                  "pm.collectionVariables.set('pollCount', '0');"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Error: delete an effect a job is using (409)",
+          "request": {
+            "method": "DELETE",
+            "url": {
+              "raw": "{{baseUrl}}/sound-effects/{{effectId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sound-effects",
+                "{{effectId}}"
+              ]
+            },
+            "description": "Refused while audio still being censored uses it."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 409', () => pm.response.to.have.status(409));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Wait for the sound-effect job",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/audio/{{effectAudioId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "audio",
+                "{{effectAudioId}}"
+              ]
+            },
+            "description": "Polls until the job finishes (automatic in the Collection Runner; by hand, press Send again until `status` changes)."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const polls = parseInt(pm.collectionVariables.get('pollCount') || '0', 10);",
+                  "if (polls > 0) setTimeout(() => {}, 3000);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "const polls = parseInt(pm.collectionVariables.get('pollCount') || '0', 10);",
+                  "if (['pending', 'processing'].includes(body.status) && polls < 200) {",
+                  "    pm.collectionVariables.set('pollCount', String(polls + 1));",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
+                  "    return;",
+                  "}",
+                  "pm.collectionVariables.set('pollCount', '0');",
+                  "pm.test('Job ended as completed', () => pm.expect(body.status).to.eql('completed'));",
+                  "pm.test('Censored download link is set', () => pm.expect(body.censored_url).to.include('/file?variant=censored'));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Delete sound effect",
+          "request": {
+            "method": "DELETE",
+            "url": {
+              "raw": "{{baseUrl}}/sound-effects/{{effectId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sound-effects",
+                "{{effectId}}"
+              ]
+            },
+            "description": "Finished audio keeps its censored file."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 204', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Error: deleted effect is gone (404)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/sound-effects/{{effectId}}/file",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sound-effects",
+                "{{effectId}}",
+                "file"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
     },
     {
       "name": "Docs",

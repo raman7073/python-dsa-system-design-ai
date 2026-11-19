@@ -1,18 +1,32 @@
 import asyncio
-from collections.abc import Callable
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import PurePosixPath
-from typing import BinaryIO
+from typing import BinaryIO, Protocol
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, tuple_
-from sqlmodel import col, select
+from sqlalchemy.exc import IntegrityError
+from sqlmodel import col, or_, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.censor_words import normalize_custom_words
 from app.config import get_api_settings
-from app.database.models import AudioFile, AudioStatus, User, utc_now
+from app.database.models import (
+    AudioFile,
+    AudioStatus,
+    AudioTranscript,
+    CensorMode,
+    JobStage,
+    SoundEffect,
+    User,
+    utc_now,
+)
+
+# One error type for "no such sound effect" across both services.
+from app.service.sound_effect_service import SoundEffectNotFoundError
 from app.storage import (
     Download,
     Storage,
@@ -24,9 +38,25 @@ from app.storage import (
     upload_key,
 )
 
-# Queues the censor job for a stored upload (its options are on the record).
-# In the app this is app.worker.celery_app.enqueue_censor; tests can pass a fake.
-EnqueueCensor = Callable[[UUID], None]
+
+class EnqueueCensor(Protocol):
+    """Queues a job's censor steps after `after` (all of them for None); the
+    job's options are on its record. In the app this is
+    app.worker.celery_app.enqueue_censor; tests pass a fake."""
+
+    def __call__(self, audio_id: UUID, after: JobStage | None = None) -> None: ...
+
+
+MAX_PADDING_MS = 1000
+def _check_padding(padding_ms: int) -> None:
+    if not 0 <= padding_ms <= MAX_PADDING_MS:
+        raise InvalidSettingsError(f"padding_ms must be between 0 and {MAX_PADDING_MS}")
+
+
+# Pipeline order of JobStage (None: nothing done yet), to compare stages.
+_STAGE_ORDER: dict[JobStage | None, int] = {None: 0} | {
+    stage: i + 1 for i, stage in enumerate(JobStage)
+}
 
 
 class AudioNotFoundError(LookupError):
@@ -57,7 +87,45 @@ class TooManyActiveJobsError(RuntimeError):
         super().__init__(f"You already have {limit} audio files being censored")
 
 
+class JobBusyError(RuntimeError):
+    """The job is still pending or processing, so its settings can't change yet."""
+
+
+class RerunNotPossibleError(RuntimeError):
+    """The job has no stored transcript to re-run from: it failed before
+    transcription finished, or ran before transcripts were kept."""
+
+
+class InvalidSettingsError(ValueError):
+    """Censor settings that don't fit together (e.g. sound_effect mode
+    without a sound effect). Bad custom words raise InvalidCustomWordsError."""
+
+
 ACTIVE_STATUSES = (AudioStatus.PENDING, AudioStatus.PROCESSING)
+
+# update_settings() refusals (raised before anything is changed).
+_REFUSALS = (
+    JobBusyError,
+    RerunNotPossibleError,
+    InvalidSettingsError,
+    SoundEffectNotFoundError,
+    TooManyActiveJobsError,
+)
+
+# What update_settings() snapshots, to put back if queuing fails.
+_RERUN_FIELDS = (
+    "custom_words",
+    "censor_mode",
+    "sound_effect_id",
+    "padding_ms",
+    "stage",
+    "status",
+    "error",
+    "task_id",
+    "attempts",
+    "queued_at",
+    "finished_at",
+)
 
 
 class AudioVariant(StrEnum):
@@ -101,17 +169,28 @@ class AudioService:
         filename: str | None,
         data: BinaryIO,
         padding_ms: int = 150,
-        beep: bool = False,
+        censor_mode: CensorMode = CensorMode.MUTE,
+        custom_words: Sequence[str] = (),
+        sound_effect_id: UUID | None = None,
     ) -> AudioFile:
         """Save the upload as a PENDING record of `owner_id` and queue its job.
 
+        `custom_words` are censored on top of the built-in list (validated by
+        normalize_custom_words); `sound_effect_id` (the user's own effect or
+        a built-in one) goes with censor_mode SOUND_EFFECT.
+
         Returns straight away; the worker censors the file and moves the
         record to COMPLETED or FAILED. Nothing is kept unless the file, the
-        row and the queued job all succeed. Raises TooManyActiveJobsError if
-        the user already has the maximum number of jobs in progress,
-        UploadTooLargeError if the upload exceeds the size limit, and
-        QueueUnavailableError if the job can't be queued.
+        row and the queued job all succeed. The settings are checked before
+        anything is stored. Raises InvalidCustomWordsError,
+        InvalidSettingsError and SoundEffectNotFoundError for bad settings,
+        TooManyActiveJobsError if the user already has the maximum number of
+        jobs in progress, UploadTooLargeError if the upload exceeds the size
+        limit, and QueueUnavailableError if the job can't be queued.
         """
+        words = list(normalize_custom_words(custom_words))
+        _check_padding(padding_ms)
+        effect_id = await self._resolve_effect(censor_mode, sound_effect_id, owner_id)
         in_suffix = input_suffix(filename)
         out_suffix = output_suffix(in_suffix)
 
@@ -142,11 +221,20 @@ class AudioService:
                 file_path=src,
                 censored_file_path=out,
                 padding_ms=padding_ms,
-                beep=beep,
+                censor_mode=censor_mode,
+                sound_effect_id=effect_id,
+                custom_words=words,
                 queued_at=utc_now(),
             )
             self.session.add(record)
-            await self.session.commit()
+            try:
+                await self.session.commit()
+            except IntegrityError as exc:
+                # The only reference that can vanish in between: the sound
+                # effect, deleted since it was checked above.
+                raise SoundEffectNotFoundError(
+                    f"No sound effect with id {sound_effect_id}"
+                ) from exc
         except BaseException:
             await self.session.rollback()
             await asyncio.to_thread(self.storage.delete, src)
@@ -195,6 +283,176 @@ class AudioService:
         if record is None:
             raise AudioNotFoundError(f"No audio with id {audio_id}")
         return record
+
+    async def update_settings(
+        self,
+        audio_id: UUID,
+        owner_id: UUID,
+        *,
+        custom_words: Sequence[str] | None = None,
+        censor_mode: CensorMode | None = None,
+        sound_effect_id: UUID | None = None,
+        padding_ms: int | None = None,
+    ) -> AudioFile:
+        """Change a finished job's censor settings and re-run only the steps
+        they affect. Arguments left as None keep their current value.
+
+        New custom words re-run detection and rendering; the stored
+        transcript is reused, so nothing is transcribed again. A new censor
+        mode, sound effect or padding re-runs rendering only. A job that
+        failed part-way re-runs from wherever it stopped, if that's earlier.
+        If nothing actually changes, nothing is queued and the record is
+        returned as it is. Otherwise it comes back PENDING, like a new
+        upload; switching away from the sound_effect mode clears the effect.
+
+        Raises AudioNotFoundError (not the user's job), JobBusyError (still
+        pending or processing), RerunNotPossibleError (no stored transcript),
+        InvalidCustomWordsError, InvalidSettingsError,
+        SoundEffectNotFoundError, TooManyActiveJobsError, and
+        QueueUnavailableError (the job is then left exactly as it was).
+        """
+        # Validate the input before locking anything.
+        new_words = (
+            list(normalize_custom_words(custom_words)) if custom_words is not None else None
+        )
+        if padding_ms is not None:
+            _check_padding(padding_ms)
+
+        # Lock the user's row first, as submit_upload does (the active-jobs
+        # cap), then the job's: the same order everywhere, so no deadlocks.
+        await self.session.exec(select(User).where(User.id == owner_id).with_for_update())
+        record = (
+            await self.session.exec(
+                select(AudioFile)
+                .where(AudioFile.id == audio_id, AudioFile.user_id == owner_id)
+                .with_for_update()
+            )
+        ).first()
+        if record is None:
+            await self.session.commit()  # release the lock
+            raise AudioNotFoundError(f"No audio with id {audio_id}")
+        # Before _plan_rerun applies the changes: what to put back if queuing fails.
+        previous = {name: getattr(record, name) for name in _RERUN_FIELDS}
+        try:
+            after = await self._plan_rerun(
+                record, owner_id, new_words, censor_mode, sound_effect_id, padding_ms
+            )
+        except _REFUSALS:
+            # Nothing was changed yet: commit() just releases the locks
+            # (rollback() would also expire the already-loaded user).
+            await self.session.commit()
+            raise
+        except BaseException:
+            await self.session.rollback()
+            raise
+        if after is None:  # nothing changed
+            await self.session.commit()  # release the locks
+            return record
+
+        record.stage = after
+        record.status = AudioStatus.PENDING
+        record.error = None
+        record.task_id = None
+        record.attempts = 0
+        record.queued_at = utc_now()
+        record.finished_at = None
+        self.session.add(record)
+        await self.session.commit()
+
+        try:
+            await asyncio.to_thread(self.enqueue_censor, audio_id, after)
+        except Exception as exc:
+            # Nothing will run: put the job back as it was.
+            for name, value in previous.items():
+                setattr(record, name, value)
+            self.session.add(record)
+            await self.session.commit()
+            raise QueueUnavailableError("Could not queue the censor steps") from exc
+        return record
+
+    async def _plan_rerun(
+        self,
+        record: AudioFile,
+        owner_id: UUID,
+        new_words: list[str] | None,
+        censor_mode: CensorMode | None,
+        sound_effect_id: UUID | None,
+        padding_ms: int | None,
+    ) -> JobStage | None:
+        """Apply the changes to `record` (not committed) and return the stage
+        to re-run after, or None if nothing changes."""
+        if record.status in ACTIVE_STATUSES:
+            raise JobBusyError(f"Audio {record.id} is still {record.status}")
+
+        mode = censor_mode or CensorMode(record.censor_mode)
+        # Keep the job's current effect if the mode stays sound_effect and no
+        # new one is given; any other mode drops it.
+        if sound_effect_id is None and mode == CensorMode.SOUND_EFFECT:
+            sound_effect_id = record.sound_effect_id
+        effect_id = await self._resolve_effect(mode, sound_effect_id, owner_id)
+
+        words_changed = new_words is not None and new_words != list(record.custom_words)
+        render_changed = (
+            mode != record.censor_mode
+            or effect_id != record.sound_effect_id
+            or (padding_ms is not None and padding_ms != record.padding_ms)
+        )
+        if not words_changed and not render_changed:
+            return None
+
+        after = JobStage.TRANSCRIBED if words_changed else JobStage.DETECTED
+        # A job that failed part-way may not have reached `after`.
+        if _STAGE_ORDER[record.stage] < _STAGE_ORDER[after]:
+            after = record.stage  # type: ignore[assignment]
+        if after is None or not await self._has_transcript(record.id):
+            raise RerunNotPossibleError(
+                f"Audio {record.id} has no stored transcript to re-run from"
+            )
+        # Re-running uses the worker like a new upload does.
+        await self._check_active_jobs(owner_id, lock=False)  # user row already locked
+
+        if new_words is not None:
+            record.custom_words = new_words
+        record.censor_mode = mode
+        record.sound_effect_id = effect_id
+        if padding_ms is not None:
+            record.padding_ms = padding_ms
+        return after
+
+    async def _resolve_effect(
+        self, mode: CensorMode, effect_id: UUID | None, owner_id: UUID
+    ) -> UUID | None:
+        """The sound effect to store with `mode`: required (and the user's own
+        or built in) for SOUND_EFFECT, not allowed with any other mode."""
+        if mode != CensorMode.SOUND_EFFECT:
+            if effect_id is not None:
+                raise InvalidSettingsError(
+                    "A sound effect only applies with censor_mode sound_effect"
+                )
+            return None
+        if effect_id is None:
+            raise InvalidSettingsError("Choose a sound effect for censor_mode sound_effect")
+        await self._check_sound_effect(effect_id, owner_id)
+        return effect_id
+
+    async def _check_sound_effect(self, effect_id: UUID, owner_id: UUID) -> None:
+        """Raise SoundEffectNotFoundError unless the effect is the user's own
+        or built in (no owner)."""
+        found = await self.session.scalar(
+            select(SoundEffect.id).where(
+                SoundEffect.id == effect_id,
+                or_(col(SoundEffect.user_id) == owner_id, col(SoundEffect.user_id).is_(None)),
+            )
+        )
+        if found is None:
+            raise SoundEffectNotFoundError(f"No sound effect with id {effect_id}")
+
+    async def _has_transcript(self, audio_id: UUID) -> bool:
+        # Selects only the key, not the (possibly large) words.
+        found = await self.session.scalar(
+            select(AudioTranscript.audio_id).where(AudioTranscript.audio_id == audio_id)
+        )
+        return found is not None
 
     async def list_audios(
         self,

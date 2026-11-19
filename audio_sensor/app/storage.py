@@ -36,6 +36,11 @@ logger = logging.getLogger(__name__)
 
 UPLOADS = "uploads"
 CENSORED = "censored"
+EFFECTS = "effects"
+
+# Formats accepted as sound effects (by extension: the API has no ffmpeg to
+# check the content; a file that isn't really audio fails the job using it).
+SOUND_EFFECT_SUFFIXES = (".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus", ".webm")
 
 # Output keeps the upload's format when pydub/ffmpeg can write it directly;
 # anything else (e.g. .m4a, .webm) comes back as WAV.
@@ -78,6 +83,10 @@ def upload_key(audio_id: UUID, suffix: str) -> str:
 
 def censored_key(audio_id: UUID, suffix: str) -> str:
     return f"{CENSORED}/{audio_id}{suffix}"
+
+
+def sound_effect_key(effect_id: UUID, suffix: str) -> str:
+    return f"{EFFECTS}/{effect_id}{suffix}"
 
 
 def media_type_for(key: str) -> str:

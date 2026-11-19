@@ -14,7 +14,12 @@ import whisperx
 from pydub import AudioSegment
 from pydub.generators import Sine
 
-from app.audio_censor import AudioCensor
+from app.audio_censor import (
+    AudioCensor,
+    InvalidCustomWordsError,
+    SoundEffectError,
+    normalize_custom_words,
+)
 
 
 @pytest.fixture
@@ -166,3 +171,141 @@ def test_unchanged_output_in_another_format_is_still_written(
     written, _ = AudioCensor().censor_audio(str(tone), output_path=str(out), copy_unchanged=False)
 
     assert written == str(out) and out.exists()  # a conversion, not a copy
+
+
+# --- custom words per file ------------------------------------------------------
+
+
+def test_custom_words_censor_only_their_own_file(fake, tone: Path, tmp_path: Path) -> None:
+    censor = AudioCensor()
+    words_in_audio = [("I", 0.1, 0.2), ("like", 0.3, 0.5), ("banana", 0.6, 1.0)]
+
+    say(fake, " I like banana", words_in_audio)
+    _, with_words = censor.censor_audio(
+        str(tone), output_path=str(tmp_path / "a.wav"), custom_words=["Banana"]
+    )
+    assert [w["word"] for w in with_words if w.get("flagged")] == ["banana"]
+
+    # The next file, from another user, without custom words: nothing flagged,
+    # and it takes the clean path (no alignment).
+    aligned_before = fake.align_calls
+    _, without = censor.censor_audio(str(tone), output_path=str(tmp_path / "b.wav"))
+    assert not any(w.get("flagged") for w in without)
+    assert fake.align_calls == aligned_before
+    assert not censor._profanity.contains_profanity("banana")  # shared list unchanged
+
+
+def test_custom_words_keep_the_built_in_list(fake, tone: Path, tmp_path: Path) -> None:
+    say(fake, " oh shit", [("oh", 0.1, 0.3), ("shit", 0.8, 1.2)])
+    _, words = AudioCensor().censor_audio(
+        str(tone), output_path=str(tmp_path / "a.wav"), custom_words=["banana"]
+    )
+    assert [w["word"] for w in words if w.get("flagged")] == ["shit"]
+
+
+def test_word_lists_are_cached_per_set_of_words(fake) -> None:
+    censor = AudioCensor()
+    first = censor._profanity_for(["banana", "Heck"])
+    assert censor._profanity_for(["heck", "banana"]) is first  # same set, any order/case
+    assert censor._profanity_for(["banana"]) is not first
+    assert censor._profanity_for([]) is censor._profanity  # none: the shared list
+
+    for i in range(AudioCensor.PROFANITY_CACHE_SIZE + 5):
+        censor._profanity_for([f"word{i}"])
+    assert len(censor._custom_profanity) == AudioCensor.PROFANITY_CACHE_SIZE  # bounded
+
+
+@pytest.mark.parametrize(
+    ("words", "expected"),
+    [
+        (["  Banana ", "BANANA", "heck", ""], ("banana", "heck")),
+        (["don't", "e-mail", "sh1t", "café"], ("don't", "e-mail", "sh1t", "café")),
+        ([], ()),
+    ],
+)
+def test_custom_words_are_normalized(words, expected) -> None:
+    assert normalize_custom_words(words) == expected
+
+
+@pytest.mark.parametrize(
+    ("words", "reason"),
+    [
+        (["ice cream"], "single words"),
+        (["x" * 41], "longer than 40"),
+        (["a_b"], "letters, digits"),
+        (["bad!"], "letters, digits"),
+        ([f"w{i}" for i in range(101)], "At most 100"),
+    ],
+)
+def test_bad_custom_words_are_refused(words, reason) -> None:
+    with pytest.raises(InvalidCustomWordsError, match=reason):
+        normalize_custom_words(words)
+
+
+# --- sound effects --------------------------------------------------------------
+
+
+@pytest.fixture
+def effect(tmp_path: Path) -> Path:
+    """A short, different-format effect: 100 ms, 2 kHz, mono, 22.05 kHz."""
+    path = tmp_path / "effect.wav"
+    (
+        Sine(2000, sample_rate=22050)
+        .to_audio_segment(duration=100, volume=-6)
+        .set_channels(1)
+        .export(path, format="wav")
+    )
+    return path
+
+
+def test_sound_effect_fills_each_span(fake, tone: Path, effect: Path, tmp_path: Path) -> None:
+    say(fake, " oh shit no", [("oh", 0.1, 0.3), ("shit", 0.8, 1.2), ("no", 1.5, 1.8)])
+    out = tmp_path / "out.wav"
+
+    AudioCensor().censor_audio(
+        str(tone), output_path=str(out), padding_ms=100, sound_effect_path=str(effect)
+    )
+
+    original, result = AudioSegment.from_file(tone), AudioSegment.from_file(out)
+    # Same length and format as the upload, whatever the effect's format.
+    assert len(result) == len(original)
+    assert (result.frame_rate, result.channels) == (original.frame_rate, original.channels)
+    # The 600 ms span is filled throughout (the 100 ms effect is repeated),
+    # and it isn't the original audio.
+    span = result[700:1300]
+    assert all(span[i : i + 100].rms > 0 for i in range(10, 590, 100))
+    assert span.raw_data != original[700:1300].raw_data
+    # Outside the span the audio is untouched.
+    assert result[100:600].raw_data == original[100:600].raw_data
+
+
+def test_sound_effect_longer_than_the_span_is_cut(fake, tone: Path, tmp_path: Path) -> None:
+    long_effect = tmp_path / "long.wav"
+    Sine(2000).to_audio_segment(duration=5000).export(long_effect, format="wav")
+    say(fake, " damn", [("damn", 0.5, 0.7)])
+    out = tmp_path / "out.wav"
+
+    AudioCensor().censor_audio(
+        str(tone), output_path=str(out), padding_ms=0, sound_effect_path=str(long_effect)
+    )
+
+    assert len(AudioSegment.from_file(out)) == len(AudioSegment.from_file(tone))
+
+
+def test_undecodable_sound_effect(fake, tone: Path, tmp_path: Path) -> None:
+    bad = tmp_path / "bad.mp3"
+    bad.write_bytes(b"not audio")
+    censor = AudioCensor()
+
+    say(fake, " damn", [("damn", 0.5, 0.7)])
+    with pytest.raises(SoundEffectError):
+        censor.censor_audio(str(tone), output_path=str(tmp_path / "a.wav"), sound_effect_path=str(bad))
+
+    # A clean file never needs the effect, so a bad one doesn't matter.
+    say(fake, " all clean")
+    censor.censor_audio(str(tone), output_path=str(tmp_path / "b.wav"), sound_effect_path=str(bad))
+
+
+def test_beep_and_sound_effect_together_are_refused(fake, tone: Path, effect: Path) -> None:
+    with pytest.raises(ValueError, match="not both"):
+        AudioCensor().censor_audio(str(tone), beep=True, sound_effect_path=str(effect))

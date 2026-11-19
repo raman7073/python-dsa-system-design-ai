@@ -64,7 +64,7 @@ from app.config import settings
 from app.database.models import User
 from app.main import app
 from app.security import hash_password
-from app.storage import CENSORED, UPLOADS, get_storage
+from app.storage import CENSORED, EFFECTS, UPLOADS, get_storage
 from tests.helpers import (
     AppUser,
     FakeQueue,
@@ -117,8 +117,8 @@ async def _truncate_tables() -> None:
 def _clean_state() -> None:
     """Empty tables and storage before every test."""
     asyncio.run(_truncate_tables())
-    shutil.rmtree(settings.storage_path / UPLOADS, ignore_errors=True)
-    shutil.rmtree(settings.storage_path / CENSORED, ignore_errors=True)
+    for folder in (UPLOADS, CENSORED, EFFECTS):
+        shutil.rmtree(settings.storage_path / folder, ignore_errors=True)
     get_storage().ensure_ready()
 
 

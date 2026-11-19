@@ -20,20 +20,37 @@ Censoring takes minutes, so it runs in the background:
 1. `POST /censor` stores the upload, creates an `audio` row with status
    `pending` (including the job's options), queues a job on Redis, and
    returns **202** right away with the record (its URL is in `Location`).
-2. The Celery worker (`app/worker/tasks.py`) claims the job (`processing`),
-   runs WhisperX, stores the censored file, and sets `completed` (with
-   `words_count` and `flagged_count`) or `failed` (with an `error`, e.g. for a
-   file that isn't audio, or one that took longer than the time limit).
+2. The Celery worker (`app/worker/tasks.py`) runs three steps, each its
+   own task taking only the audio id, queued as a chain:
+   1. **transcribe**: WhisperX transcribes the upload and the transcript,
+      with every word's timestamps, is stored (`audio_transcripts`);
+   2. **detect**: flags profane words in the stored transcript (the
+      built-in list plus the job's `custom_words`);
+   3. **render**: writes the censored audio (mute, beep or sound effect)
+      and sets `completed` (with `words_count` and `flagged_count`).
+
+   Any step can fail the job (`failed`, with an `error`, e.g. for a file
+   that isn't audio). The job's `stage` records the last finished step;
+   a step only runs when the job is waiting for exactly that step.
 3. The client polls `GET /audio/{id}` until `status` is `completed`, then
    downloads `censored_url`. Asking for the censored file earlier returns 409.
 
-The API never loads the Whisper models; only the worker does, and only when
-a job needs them: the Whisper model on the first job, the alignment model
-(word timestamps) on the first job that has something to censor. Both are
-then kept in memory (about 1.7 GB together), since loading takes minutes.
-A file with nothing to censor skips alignment entirely. If its format can be
-written back, no second file is stored at all: the job's censored file is
-the upload itself (otherwise it is converted).
+**Running steps again.** Because the transcript is stored, a job can be
+detected and rendered again (e.g. with different custom words) without
+re-transcribing, or just rendered again (e.g. with beep instead of mute).
+`AudioService.update_settings()` does this: give it the new
+`custom_words`, `censor_mode`, `sound_effect_id` or `padding_ms`, and it
+re-runs only the steps the change affects (new words: detect + render;
+anything else: render), resetting the job to `pending`. It refuses jobs
+still running, and jobs without a stored transcript (those from before
+transcripts were kept).
+
+The API never loads the Whisper models; only the worker does, on its first
+job, and keeps them (about 1.7 GB), since loading takes minutes. Detection
+and rendering need no models and take about a second. Every file is aligned
+(word timestamps), since later detection may flag any word. A file with
+nothing to censor, in a format that can be written back, stores no second
+file: the job's censored file is the upload itself.
 
 ### What happens when things go wrong
 
@@ -57,6 +74,37 @@ the upload itself (otherwise it is converted).
   client IP, `/censor` 30/hour per user. Over the limit: **429** with
   `Retry-After`. They count every request, so set `RATE_LIMIT_ENABLED=false`
   in `.env` when running the Postman collection repeatedly.
+
+## Censor settings
+
+Each job has settings, set on upload (`POST /censor` form fields) and
+changeable afterwards (`PATCH /audio/{id}` with JSON):
+
+- `censor_mode`: `mute` (default), `beep`, or `sound_effect` (with
+  `sound_effect_id`). `beep=true` still works on upload, for older clients.
+- `custom_words`: extra words to censor on top of the built-in list. On
+  upload, send the field once per word. Single words only (letters, digits,
+  `'` and `-`), at most 100; whole words, so `banana` doesn't catch
+  `bananas`.
+- `padding_ms`: extra milliseconds censored on each side of a word (0-1000).
+
+`PATCH /audio/{id}` answers **202** when it queues a re-run (new words:
+detect + render; anything else: render only; never a new transcription) and
+**200** when nothing changed. It refuses jobs still running (409) and jobs
+without a stored transcript (409: upload again).
+
+## Sound effects
+
+`POST /sound-effects` (form: `file`, `name`) uploads a short clip (wav, mp3,
+flac, ogg, m4a, aac, opus or webm; at most `MAX_SOUND_EFFECT_MB`, 2 MB). It is
+stored like uploads (`effects/<id>.<ext>`, local or S3); names are unique per
+user, at most `MAX_SOUND_EFFECTS_PER_USER` (20) each. `GET /sound-effects`
+lists yours plus built-in ones (rows with no owner); `GET
+/sound-effects/{id}/file` downloads one; `DELETE /sound-effects/{id}` removes
+yours (409 while a job still being censored uses it). When rendering, the
+effect replaces each censored word, repeated or cut to fit. The API checks
+only the file type and size (it has no ffmpeg); a file that isn't really
+audio fails the job that uses it, with a clear error.
 
 ## Listing audio
 

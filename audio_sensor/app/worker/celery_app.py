@@ -8,12 +8,22 @@ needs. Start everything with:
 
 from uuid import UUID
 
-from celery import Celery
+from celery import Celery, chain
 
 from app.config import get_worker_settings, settings
+from app.database.models import JobStage
 
 # Tasks are queued by name, so the API never imports app.worker.tasks.
-CENSOR_TASK = "audio.censor"
+# A censor job is three steps, each its own task (see app.worker.tasks):
+TRANSCRIBE_TASK = "audio.transcribe"
+DETECT_TASK = "audio.detect_profanity"
+RENDER_TASK = "audio.render"
+# Each step with the stage the job must be at for it to run.
+PIPELINE: tuple[tuple[str, JobStage | None], ...] = (
+    (TRANSCRIBE_TASK, None),
+    (DETECT_TASK, JobStage.TRANSCRIBED),
+    (RENDER_TASK, JobStage.DETECTED),
+)
 RECOVER_TASK = "audio.recover_stuck_jobs"
 RECOVER_EVERY_SECONDS = 5 * 60
 
@@ -33,7 +43,7 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     # With late acknowledgement, Redis hands a job to another worker if it
     # isn't acknowledged within this time, so it must exceed the longest job
-    # (which the time limit on the censor task caps).
+    # step (which each task's time limit caps).
     broker_transport_options={
         "visibility_timeout": settings.job_time_limit_seconds + 30 * 60,
     },
@@ -64,10 +74,25 @@ if max_memory_mb := get_worker_settings().WORKER_MAX_MEMORY_PER_CHILD_MB:
     celery_app.conf.worker_max_memory_per_child = max_memory_mb * 1024  # in KiB
 
 
-def enqueue_censor(audio_id: UUID) -> None:
-    """Queue the censor job for a stored upload. Raises if Redis is unreachable.
+def enqueue_censor(audio_id: UUID, after: JobStage | None = None) -> None:
+    """Queue the censor steps that follow `after`, as a chain. Raises if
+    Redis is unreachable.
 
-    The job's options (padding_ms, beep) are read from the record, so the
-    same message can be sent again if it is lost.
+    after=None (a new upload): transcribe, detect, render. To run steps again,
+    first set the job's stage back to `after`, e.g. JobStage.TRANSCRIBED to
+    detect with new custom words and render again without re-transcribing.
+
+    Each task gets only the audio id and reads everything else from the
+    record, so the same steps can be queued again if their messages are lost.
     """
-    celery_app.send_task(CENSOR_TASK, args=[audio_id])
+    names = [name for name, requires in PIPELINE if _order(requires) >= _order(after)]
+    if not names:
+        raise ValueError(f"No steps follow {after!r}")
+    # immutable: each task gets only the audio id, not the previous result.
+    steps = [celery_app.signature(name, args=[audio_id], immutable=True) for name in names]
+    chain(*steps).apply_async()
+
+
+def _order(stage: JobStage | None) -> int:
+    """Position in the pipeline: None (nothing done) < TRANSCRIBED < ..."""
+    return 0 if stage is None else list(JobStage).index(stage) + 1

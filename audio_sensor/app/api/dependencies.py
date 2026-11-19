@@ -3,13 +3,14 @@
 from typing import Annotated
 
 from fastapi import Depends, Request
-from sqlmodel import Session
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.audio_censor import AudioCensor
 from app.database.session import get_session
 from app.service.audio_service import AudioService
+from app.service.user_service import UserService
 
-SessionDep = Annotated[Session, Depends(get_session)]
+SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
 
 def get_censor(request: Request) -> AudioCensor:
@@ -35,3 +36,10 @@ def get_audio_service(session: SessionDep, censor: CensorDep) -> AudioService:
 
 
 AudioServiceDep = Annotated[AudioService, Depends(get_audio_service)]
+
+
+def get_user_service(session: SessionDep) -> UserService:
+    return UserService(session)
+
+
+UserServiceDep = Annotated[UserService, Depends(get_user_service)]

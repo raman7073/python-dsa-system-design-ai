@@ -17,3 +17,15 @@ class AudioFile(SQLModel, table=True):
     # Timezone-aware (UTC): SQLModel rejects naive datetimes, and the column
     # is TIMESTAMP WITH TIME ZONE.
     created_at: datetime = Field(default_factory=utc_now)
+
+
+class User(SQLModel, table=True):
+    # "user" is a reserved word in PostgreSQL, so the table is "users".
+    __tablename__ = "users"
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    # Stored lower-cased (see UserService), so uniqueness is case-insensitive.
+    email: str = Field(max_length=254, unique=True, index=True)
+    # Argon2 hash; the plain password is never stored.
+    hashed_password: str
+    is_active: bool = True
+    created_at: datetime = Field(default_factory=utc_now)

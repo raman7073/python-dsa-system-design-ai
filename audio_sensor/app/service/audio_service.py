@@ -1,10 +1,11 @@
+import asyncio
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import BinaryIO
 from uuid import UUID, uuid4
 
-from sqlmodel import Session
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.audio_censor import AudioCensor, Word
 from app.config import settings
@@ -63,7 +64,7 @@ class AudioService:
 
     def __init__(
         self,
-        session: Session,
+        session: AsyncSession,
         censor: AudioCensor,
         max_upload_bytes: int = settings.max_upload_bytes,
     ):
@@ -71,7 +72,7 @@ class AudioService:
         self.censor = censor
         self.max_upload_bytes = max_upload_bytes
 
-    def censor_upload(
+    async def censor_upload(
         self,
         filename: str | None,
         data: BinaryIO,
@@ -84,6 +85,9 @@ class AudioService:
         failure the transaction is rolled back and the files are deleted.
         Raises UploadTooLargeError if the upload exceeds the size limit, and
         AudioDecodeError if it isn't decodable audio.
+
+        The blocking parts (file I/O and the CPU-heavy censoring) run in a
+        worker thread so they don't stall the event loop for other requests.
         """
         in_suffix = input_suffix(filename)
         out_suffix = output_suffix(in_suffix)
@@ -95,9 +99,13 @@ class AudioService:
         out = CENSORED_DIR / f"{audio_id}{out_suffix}"
 
         try:
-            save_upload(data, src, self.max_upload_bytes)
-            _, words = self.censor.censor_audio(
-                str(src), output_path=str(out), padding_ms=padding_ms, beep=beep
+            await asyncio.to_thread(save_upload, data, src, self.max_upload_bytes)
+            _, words = await asyncio.to_thread(
+                self.censor.censor_audio,
+                str(src),
+                output_path=str(out),
+                padding_ms=padding_ms,
+                beep=beep,
             )
 
             record = AudioFile(
@@ -106,12 +114,12 @@ class AudioService:
                 censored_file_path=to_stored_path(out),
             )
             self.session.add(record)
-            self.session.commit()
+            await self.session.commit()
             # No refresh(): every field is set in Python, and anything that
             # could fail after commit must not reach the cleanup below, or it
             # would delete the files of a row that was already saved.
         except BaseException:
-            self.session.rollback()
+            await self.session.rollback()
             delete_files(src, out)
             raise
 
@@ -122,14 +130,14 @@ class AudioService:
             download_filename=f"{Path(filename or 'audio').stem}_censored{out_suffix}",
         )
 
-    def get_audio(self, audio_id: UUID) -> AudioFile:
+    async def get_audio(self, audio_id: UUID) -> AudioFile:
         """The `audio` record for this ID. Raises AudioNotFoundError."""
-        record = self.session.get(AudioFile, audio_id)
+        record = await self.session.get(AudioFile, audio_id)
         if record is None:
             raise AudioNotFoundError(f"No audio with id {audio_id}")
         return record
 
-    def get_audio_file(
+    async def get_audio_file(
         self, audio_id: UUID, variant: AudioVariant = AudioVariant.CENSORED
     ) -> StoredAudioFile:
         """The censored or original file of a stored record.
@@ -137,7 +145,7 @@ class AudioService:
         Raises AudioNotFoundError if the record doesn't exist or its file has
         been removed from storage.
         """
-        record = self.get_audio(audio_id)
+        record = await self.get_audio(audio_id)
         stored = (
             record.censored_file_path
             if variant is AudioVariant.CENSORED

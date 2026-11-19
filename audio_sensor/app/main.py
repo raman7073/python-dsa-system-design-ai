@@ -3,10 +3,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from scalar_fastapi import add_scalar_reference
 
-from app.api.router import router
+from app.api.audio import router as audio_router
+from app.api.auth import router as auth_router
 from app.audio_censor import AudioCensor
 from app.config import settings
-from app.database.session import init_db
+from app.database.session import close_db, init_db
 from app.storage import ensure_storage_dirs
 
 
@@ -14,7 +15,7 @@ from app.storage import ensure_storage_dirs
 async def lifespan(app: FastAPI):
     # Create missing tables first: it's fast and fails immediately if the
     # database is unreachable, instead of after the slow model load below.
-    init_db()
+    await init_db()
     ensure_storage_dirs()
 
     # One shared instance for all requests (see app.api.dependencies.get_censor).
@@ -25,6 +26,7 @@ async def lifespan(app: FastAPI):
     )
     app.state.censor.load_models()
     yield
+    await close_db()
 
 
 app = FastAPI(
@@ -34,4 +36,5 @@ app = FastAPI(
     lifespan=lifespan,
 )
 add_scalar_reference(app)  # interactive API docs at /scalar
-app.include_router(router)
+app.include_router(audio_router)
+app.include_router(auth_router)

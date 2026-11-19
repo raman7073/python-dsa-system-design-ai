@@ -33,7 +33,7 @@ router = APIRouter(tags=["censor"])
         413: {"description": f"The upload exceeds {settings.MAX_UPLOAD_MB} MB."},
     },
 )
-def censor_endpoint(
+async def censor_endpoint(
     service: AudioServiceDep,
     file: Annotated[UploadFile, File(description="Audio file (wav, mp3, flac, ogg, m4a, ...).")],
     beep: Annotated[
@@ -43,10 +43,12 @@ def censor_endpoint(
         int, Form(ge=0, le=1000, description="Extra milliseconds muted on each side of a word.")
     ] = 150,
 ):
-    # A plain `def` endpoint: FastAPI runs it in a worker thread, so the
-    # CPU-heavy transcription doesn't block the event loop.
+    # The service runs the CPU-heavy censoring in a worker thread, so this
+    # async endpoint doesn't block the event loop.
     try:
-        result = service.censor_upload(file.filename, file.file, padding_ms=padding_ms, beep=beep)
+        result = await service.censor_upload(
+            file.filename, file.file, padding_ms=padding_ms, beep=beep
+        )
     except UploadTooLargeError as exc:
         raise HTTPException(413, f"Upload exceeds {settings.MAX_UPLOAD_MB} MB.") from exc
     except AudioDecodeError as exc:
@@ -71,9 +73,9 @@ def censor_endpoint(
     response_model=AudioRead,
     responses={404: {"description": "No audio with this ID."}},
 )
-def read_audio(audio_id: UUID, service: AudioServiceDep, request: Request) -> AudioRead:
+async def read_audio(audio_id: UUID, service: AudioServiceDep, request: Request) -> AudioRead:
     try:
-        record = service.get_audio(audio_id)
+        record = await service.get_audio(audio_id)
     except AudioNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
 
@@ -97,7 +99,7 @@ def read_audio(audio_id: UUID, service: AudioServiceDep, request: Request) -> Au
         404: {"description": "No audio with this ID, or its file is missing."},
     },
 )
-def read_audio_file(
+async def read_audio_file(
     audio_id: UUID,
     service: AudioServiceDep,
     variant: Annotated[
@@ -105,7 +107,7 @@ def read_audio_file(
     ] = AudioVariant.CENSORED,
 ):
     try:
-        stored = service.get_audio_file(audio_id, variant)
+        stored = await service.get_audio_file(audio_id, variant)
     except AudioNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
 

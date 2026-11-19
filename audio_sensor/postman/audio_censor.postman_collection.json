@@ -1,13 +1,33 @@
 {
   "info": {
     "name": "Audio Censor API",
-    "description": "Requests for the Audio Censor FastAPI app.\n\n**Before running:**\n1. Start the server: `uv run fastapi dev app/main.py` (from the `audio_sensor` folder).\n2. Wait for `Application startup complete`.\n3. If you run on a different port, change the `baseUrl` collection variable.\n\nThe `/censor` requests point at `C:\\Users\\Lenovo\\Downloads\\freesound_community-fuck-36089.mp3`. To use another file, open the request's **Body** tab and pick a file in the `file` row.\n\nUse **Send and Download** (arrow next to Send) to save the censored audio. Each request has checks in its **Tests** tab; results show in the response **Test Results** tab.",
+    "description": "Requests for the Audio Censor FastAPI app.\n\n**Before running:**\n1. Start the server: `uv run fastapi dev app/main.py` (from the `audio_sensor` folder).\n2. Wait for `Application startup complete`.\n3. If you run on a different port, change the `baseUrl` collection variable.\n\nThe `/censor` requests point at `C:\\Users\\Lenovo\\Downloads\\freesound_community-fuck-36089.mp3`. To use another file, open the request's **Body** tab and pick a file in the `file` row.\n\nFolders run in order: **Censor** saves the new record's ID as `audioId`, which the **Audio** folder uses; **Auth** generates a fresh signup email each run.\n\nUse **Send and Download** (arrow next to Send) to save the censored audio. Each request has checks in its **Tests** tab; results show in the response **Test Results** tab.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
     {
       "key": "baseUrl",
       "value": "http://127.0.0.1:8000",
+      "type": "string"
+    },
+    {
+      "key": "audioId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "signupEmail",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "signupEmailUpper",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "userId",
+      "value": "",
       "type": "string"
     }
   ],
@@ -22,8 +42,12 @@
             "description": "Uploads an audio file; flagged words are replaced with silence. Returns the censored audio file.",
             "url": {
               "raw": "{{baseUrl}}/censor",
-              "host": ["{{baseUrl}}"],
-              "path": ["censor"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "censor"
+              ]
             },
             "body": {
               "mode": "formdata",
@@ -69,7 +93,11 @@
                   "    pm.expect(flagged).to.be.within(0, words);",
                   "    console.log(`words=${words}, flagged=${flagged}`);",
                   "});",
-                  "pm.test('Body is not empty', () => pm.expect(pm.response.responseSize).to.be.above(0));"
+                  "pm.test('Body is not empty', () => pm.expect(pm.response.responseSize).to.be.above(0));",
+                  "",
+                  "const audioId = pm.response.headers.get('X-Audio-Id');",
+                  "if (audioId) pm.collectionVariables.set('audioId', audioId);",
+                  "pm.test('X-Audio-Id header is set', () => pm.expect(audioId).to.match(/^[0-9a-f-]{36}$/));"
                 ]
               }
             }
@@ -83,8 +111,12 @@
             "description": "Same as mute, but flagged words are replaced with a 1 kHz beep.",
             "url": {
               "raw": "{{baseUrl}}/censor",
-              "host": ["{{baseUrl}}"],
-              "path": ["censor"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "censor"
+              ]
             },
             "body": {
               "mode": "formdata",
@@ -125,7 +157,11 @@
                   "    const flagged = parseInt(pm.response.headers.get('X-Flagged-Count'), 10);",
                   "    pm.expect(flagged).to.be.within(0, words);",
                   "    console.log(`words=${words}, flagged=${flagged}`);",
-                  "});"
+                  "});",
+                  "",
+                  "const audioId = pm.response.headers.get('X-Audio-Id');",
+                  "if (audioId) pm.collectionVariables.set('audioId', audioId);",
+                  "pm.test('X-Audio-Id header is set', () => pm.expect(audioId).to.match(/^[0-9a-f-]{36}$/));"
                 ]
               }
             }
@@ -139,8 +175,12 @@
             "description": "Upload any file that isn't audio (e.g. a .txt or this collection's .json). Expects 400.\n\nPick the file in the Body tab's `file` row before sending.",
             "url": {
               "raw": "{{baseUrl}}/censor",
-              "host": ["{{baseUrl}}"],
-              "path": ["censor"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "censor"
+              ]
             },
             "body": {
               "mode": "formdata",
@@ -177,8 +217,12 @@
             "description": "Uploads a file bigger than the server's MAX_UPLOAD_MB limit (default 50 MB). Expects 413, and nothing is stored.\n\n**Easiest way to test:** restart the server with a 1 MB limit, then pick any file over 1 MB in the Body tab's `file` row:\n\n```powershell\n$env:MAX_UPLOAD_MB = \"1\"; uv run fastapi dev app/main.py\n```\n\nRemove the variable afterwards (`Remove-Item Env:MAX_UPLOAD_MB`) or open a new terminal to get the normal limit back.",
             "url": {
               "raw": "{{baseUrl}}/censor",
-              "host": ["{{baseUrl}}"],
-              "path": ["censor"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "censor"
+              ]
             },
             "body": {
               "mode": "formdata",
@@ -215,8 +259,12 @@
             "description": "padding_ms must be 0-1000; 5000 is rejected by validation before any processing.",
             "url": {
               "raw": "{{baseUrl}}/censor",
-              "host": ["{{baseUrl}}"],
-              "path": ["censor"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "censor"
+              ]
             },
             "body": {
               "mode": "formdata",
@@ -258,8 +306,12 @@
             "description": "No file uploaded; expects a 422 validation error on `file`.",
             "url": {
               "raw": "{{baseUrl}}/censor",
-              "host": ["{{baseUrl}}"],
-              "path": ["censor"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "censor"
+              ]
             },
             "body": {
               "mode": "formdata",
@@ -292,6 +344,668 @@
       ]
     },
     {
+      "name": "Audio",
+      "description": "Read stored censor jobs. Run a **Censor audio** request first: it saves the new record's ID into the `audioId` collection variable.",
+      "item": [
+        {
+          "name": "Get audio record",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/audio/{{audioId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "audio",
+                "{{audioId}}"
+              ]
+            },
+            "description": "Metadata for a stored job, with download links."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Has id, created_at and download URLs', () => {",
+                  "    pm.expect(body).to.have.all.keys('id', 'created_at', 'censored_url', 'original_url');",
+                  "    pm.expect(body.id).to.eql(pm.collectionVariables.get('audioId'));",
+                  "});",
+                  "pm.test('URLs point at the file endpoint', () => {",
+                  "    pm.expect(body.censored_url).to.include('/file?variant=censored');",
+                  "    pm.expect(body.original_url).to.include('/file?variant=original');",
+                  "});",
+                  "pm.test('No internal storage paths exposed', () => {",
+                  "    pm.expect(pm.response.text()).to.not.include('storage');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Download censored file",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/audio/{{audioId}}/file?variant=censored",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "audio",
+                "{{audioId}}",
+                "file"
+              ],
+              "query": [
+                {
+                  "key": "variant",
+                  "value": "censored"
+                }
+              ]
+            },
+            "description": "Use **Send and Download** to save it. `variant` defaults to `censored`."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Response is audio', () => pm.expect(pm.response.headers.get('Content-Type')).to.match(/^audio\\//));",
+                  "pm.test('Filename ends with _censored', () => pm.expect(pm.response.headers.get('Content-Disposition')).to.include('_censored'));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Download original file",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/audio/{{audioId}}/file?variant=original",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "audio",
+                "{{audioId}}",
+                "file"
+              ],
+              "query": [
+                {
+                  "key": "variant",
+                  "value": "original"
+                }
+              ]
+            },
+            "description": "The upload exactly as it was received."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Response is audio', () => pm.expect(pm.response.headers.get('Content-Type')).to.match(/^audio\\//));",
+                  "pm.test('Not the censored file', () => pm.expect(pm.response.headers.get('Content-Disposition')).to.not.include('_censored'));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Error: unknown id (404)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/audio/00000000-0000-0000-0000-000000000000",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "audio",
+                "00000000-0000-0000-0000-000000000000"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 404', () => pm.response.to.have.status(404));",
+                  "pm.test('Explains what is missing', () => pm.expect(pm.response.json().detail).to.include('No audio with id'));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Error: invalid id (422)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/audio/not-a-uuid",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "audio",
+                "not-a-uuid"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 422', () => pm.response.to.have.status(422));",
+                  "pm.test('Error points at audio_id', () => pm.expect(pm.response.json().detail[0].loc).to.eql(['path', 'audio_id']));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Error: invalid variant (422)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/audio/{{audioId}}/file?variant=nope",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "audio",
+                "{{audioId}}",
+                "file"
+              ],
+              "query": [
+                {
+                  "key": "variant",
+                  "value": "nope"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 422', () => pm.response.to.have.status(422));",
+                  "pm.test('Error points at variant', () => pm.expect(pm.response.json().detail[0].loc).to.eql(['query', 'variant']));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "description": "User signup. **Sign up** generates a fresh email each run (saved as `signupEmail`), so it never collides with an existing account; the duplicate requests reuse it.",
+      "item": [
+        {
+          "name": "Sign up",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/signup",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "signup"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{signupEmail}}\",\n  \"password\": \"correct-horse-42\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Creates an account. Password rules: 8-128 characters, at least one letter and one digit, no leading/trailing spaces."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Fresh, mixed-case email per run so this never hits an existing account.",
+                  "pm.collectionVariables.set('signupEmail', `Postman.User+${Date.now()}@Example.com`);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 201', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test('Returns id, email, is_active, created_at', () => {",
+                  "    pm.expect(body).to.have.all.keys('id', 'email', 'is_active', 'created_at');",
+                  "});",
+                  "pm.test('Email is stored lower-cased', () => {",
+                  "    pm.expect(body.email).to.eql(pm.collectionVariables.get('signupEmail').toLowerCase());",
+                  "});",
+                  "pm.test('Password is never returned', () => pm.expect(pm.response.text().toLowerCase()).to.not.include('password'));",
+                  "pm.test('New accounts are active', () => pm.expect(body.is_active).to.be.true);",
+                  "pm.collectionVariables.set('userId', body.id);"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Error: email already registered (409)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/signup",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "signup"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{signupEmail}}\",\n  \"password\": \"correct-horse-42\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Run **Sign up** first; this reuses its email."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 409', () => pm.response.to.have.status(409));",
+                  "pm.test('Explains the conflict', () => pm.expect(pm.response.json().detail).to.include('already exists'));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Error: same email, different case (409)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/signup",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "signup"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{signupEmailUpper}}\",\n  \"password\": \"correct-horse-42\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Run **Sign up** first; this sends its email in UPPER CASE."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('signupEmailUpper', (pm.collectionVariables.get('signupEmail') || '').toUpperCase());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 409 (emails are case-insensitive)', () => pm.response.to.have.status(409));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Error: invalid email (422)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/signup",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "signup"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"not-an-email\",\n  \"password\": \"correct-horse-42\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 422', () => pm.response.to.have.status(422));",
+                  "const err = pm.response.json().detail[0];",
+                  "pm.test('Error is on email', () => pm.expect(err.loc).to.include('email'));",
+                  "pm.test('Message mentions: valid email', () => pm.expect(err.msg).to.include('valid email'));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Error: password too short (422)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/signup",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "signup"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"short@example.com\",\n  \"password\": \"abc12\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 422', () => pm.response.to.have.status(422));",
+                  "const err = pm.response.json().detail[0];",
+                  "pm.test('Error is on password', () => pm.expect(err.loc).to.include('password'));",
+                  "pm.test('Message mentions: at least 8 characters', () => pm.expect(err.msg).to.include('at least 8 characters'));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Error: password without digit (422)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/signup",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "signup"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"nodigit@example.com\",\n  \"password\": \"onlyletters\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 422', () => pm.response.to.have.status(422));",
+                  "const err = pm.response.json().detail[0];",
+                  "pm.test('Error is on password', () => pm.expect(err.loc).to.include('password'));",
+                  "pm.test('Message mentions: at least one digit', () => pm.expect(err.msg).to.include('at least one digit'));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Error: password without letter (422)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/signup",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "signup"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"noletter@example.com\",\n  \"password\": \"1234567890\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 422', () => pm.response.to.have.status(422));",
+                  "const err = pm.response.json().detail[0];",
+                  "pm.test('Error is on password', () => pm.expect(err.loc).to.include('password'));",
+                  "pm.test('Message mentions: at least one letter', () => pm.expect(err.msg).to.include('at least one letter'));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Error: unknown field (422)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/signup",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "signup"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"extra@example.com\",\n  \"password\": \"correct-horse-42\",\n  \"is_active\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Unknown fields are rejected, so clients can't set fields like is_active."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 422', () => pm.response.to.have.status(422));",
+                  "const err = pm.response.json().detail[0];",
+                  "pm.test('Error is on is_active', () => pm.expect(err.loc).to.include('is_active'));",
+                  "pm.test('Message mentions: Extra inputs are not permitted', () => pm.expect(err.msg).to.include('Extra inputs are not permitted'));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Error: missing password (422)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/signup",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "signup"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"nopass@example.com\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 422', () => pm.response.to.have.status(422));",
+                  "const err = pm.response.json().detail[0];",
+                  "pm.test('Error is on password', () => pm.expect(err.loc).to.include('password'));",
+                  "pm.test('Message mentions: Field required', () => pm.expect(err.msg).to.include('Field required'));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    },
+    {
       "name": "Docs",
       "item": [
         {
@@ -301,8 +1015,12 @@
             "description": "HTML page; easier to open in a browser at {{baseUrl}}/scalar.",
             "url": {
               "raw": "{{baseUrl}}/scalar",
-              "host": ["{{baseUrl}}"],
-              "path": ["scalar"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "scalar"
+              ]
             }
           },
           "event": [
@@ -325,8 +1043,12 @@
             "method": "GET",
             "url": {
               "raw": "{{baseUrl}}/openapi.json",
-              "host": ["{{baseUrl}}"],
-              "path": ["openapi.json"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "openapi.json"
+              ]
             }
           },
           "event": [

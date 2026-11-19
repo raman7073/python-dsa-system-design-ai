@@ -1,9 +1,10 @@
 import logging
-import threading
+import shutil
 import warnings
 from pathlib import Path
 from typing import NotRequired, TypedDict
 
+import torch
 import whisperx
 from better_profanity import Profanity
 from pydub import AudioSegment
@@ -32,6 +33,13 @@ class AudioDecodeError(ValueError):
 
 
 class AudioCensor:
+    """Transcribes audio, flags profanity, and mutes or beeps it out.
+
+    Not thread-safe: use one instance per process (the Celery worker runs one
+    job at a time per process). Models load on first use and are kept, since
+    loading takes far longer than a typical job.
+    """
+
     DEVICE = "cpu"
     LANGUAGE = "en"
     # The classic broadcast "bleep": a 1 kHz sine tone.
@@ -48,6 +56,7 @@ class AudioCensor:
         batch_size: int = 8,
         vad_onset: float = 0.3,
         vad_offset: float = 0.2,
+        threads: int | None = None,
     ):
         self.censor_words = censor_words or []
         self.model_name = model_name
@@ -58,6 +67,10 @@ class AudioCensor:
         # can skip short or shouted words entirely, e.g. a lone "f***!"; for a
         # censor, missing a word is worse than transcribing a bit of noise.
         self.vad_options = {"vad_onset": vad_onset, "vad_offset": vad_offset}
+        # CPU threads for transcription. WhisperX's default is 4; by default
+        # use one per physical core (what torch picks), since a worker runs
+        # one job at a time.
+        self.threads = threads or torch.get_num_threads()
 
         # better_profanity's built-in English word list plus our own censor
         # words. A per-instance Profanity (instead of the module-level
@@ -66,35 +79,39 @@ class AudioCensor:
         if self.censor_words:
             self._profanity.add_censor_words(self.censor_words)
 
-        # Models are loaded on first use (or by calling load_models()) and
-        # reused, because loading takes far longer than transcribing a clip.
+        # Loaded on first use and kept. The alignment model (word timestamps)
+        # is only needed to mute something, so a worker that only ever sees
+        # clean audio never loads it.
         self._asr_model = None
         self._align_model = None
         self._align_metadata = None
-        # Guards model loading and use: the models aren't safe to run from
-        # several threads at once (e.g. concurrent API requests), and on CPU
-        # parallel runs would only slow each other down anyway.
-        self._model_lock = threading.Lock()
 
     def load_models(self) -> None:
-        """Load the Whisper and alignment models now instead of on first use."""
-        with self._model_lock:
-            self._load_models_unlocked()
+        """Load both models now instead of on first use."""
+        self._get_asr_model()
+        self._get_align_model()
 
-    def _load_models_unlocked(self) -> None:
+    def _get_asr_model(self):
         if self._asr_model is None:
+            logger.info("Loading Whisper model %r (%d threads)", self.model_name, self.threads)
             self._asr_model = whisperx.load_model(
                 self.model_name,
                 self.DEVICE,
                 compute_type=self.compute_type,
                 language=self.LANGUAGE,
                 vad_options=self.vad_options,
+                threads=self.threads,
             )
+        return self._asr_model
+
+    def _get_align_model(self):
         if self._align_model is None:
+            logger.info("Loading alignment model")
             self._align_model, self._align_metadata = whisperx.load_align_model(
                 language_code=self.LANGUAGE,
                 device=self.DEVICE,
             )
+        return self._align_model, self._align_metadata
 
     def censor_audio(
         self,
@@ -102,15 +119,36 @@ class AudioCensor:
         output_path: str | None = None,
         padding_ms: int = 150,
         beep: bool = False,
-    ) -> tuple[str, list[Word]]:
+        copy_unchanged: bool = True,
+    ) -> tuple[str | None, list[Word]]:
         """Full pipeline: transcribe, flag profanity, then mute or beep it.
 
         Returns (output_path, words), where `words` is every transcribed word
         with its "flagged" value. If nothing is flagged the audio is still
-        written to `output_path` unchanged, so callers always get a file back.
+        written to `output_path` unchanged, so callers always get a file back
+        -- unless `copy_unchanged` is False: then, if the output would be an
+        exact copy (same format), nothing is written and None is returned in
+        place of the path, so the caller can reuse the original file.
         Raises AudioDecodeError if the file isn't decodable audio.
+
+        Word timestamps (the alignment step) are only needed to mute
+        something, so a clean transcript skips alignment and re-encoding.
         """
-        words = self.detect_profanity(self.transcribe_audio(audio_path))
+        audio = self._decode(audio_path)
+        segments = self._transcribe(audio)
+        if not any(self._profanity.contains_profanity(s["text"]) for s in segments):
+            # The whole-segment check is at least as strict as the per-word
+            # one (it also catches multi-word censor phrases), so nothing
+            # would have been flagged.
+            words = [
+                Word(word=w, flagged=False) for s in segments for w in s["text"].split()
+            ]
+            out = self._output_path(audio_path, output_path)
+            if not copy_unchanged and out.suffix.lower() == Path(audio_path).suffix.lower():
+                return None, words
+            return self._write_unchanged(audio_path, str(out)), words
+
+        words = self.detect_profanity(self._align(segments, audio))
         out = self.mute_audio(audio_path, words, output_path, padding_ms, beep)
         return out, words
 
@@ -120,28 +158,35 @@ class AudioCensor:
         Returns one Word per transcribed word, in order (without "flagged").
         Raises AudioDecodeError if the file isn't decodable audio.
         """
-        # Decodes any format ffmpeg understands into 16 kHz mono float32.
-        # Done outside the lock: it doesn't touch the models.
+        audio = self._decode(audio_path)
+        return self._align(self._transcribe(audio), audio)
+
+    @staticmethod
+    def _decode(audio_path: str):
+        """Any format ffmpeg understands, as 16 kHz mono float32 (for Whisper)."""
         try:
-            audio = whisperx.load_audio(audio_path)
+            return whisperx.load_audio(audio_path)
         except RuntimeError as exc:
             raise AudioDecodeError(f"Could not decode {audio_path!r} as audio") from exc
 
-        with self._model_lock:
-            self._load_models_unlocked()
-            assert self._asr_model is not None  # set by _load_models_unlocked()
-            result = self._asr_model.transcribe(
-                audio, batch_size=self.batch_size, language=self.LANGUAGE
-            )
-            aligned = whisperx.align(
-                result["segments"],
-                self._align_model,
-                self._align_metadata,
-                audio,
-                self.DEVICE,
-                return_char_alignments=False,
-            )
+    def _transcribe(self, audio) -> list[dict]:
+        """Whisper segments: {"text", "start", "end"} (no word timestamps)."""
+        result = self._get_asr_model().transcribe(
+            audio, batch_size=self.batch_size, language=self.LANGUAGE
+        )
+        return list(result["segments"])
 
+    def _align(self, segments: list[dict], audio) -> list[Word]:
+        """Force-align segments to get each word's start/end times."""
+        align_model, metadata = self._get_align_model()
+        aligned = whisperx.align(
+            segments,  # type: ignore[arg-type]
+            align_model,
+            metadata,
+            audio,
+            self.DEVICE,
+            return_char_alignments=False,
+        )
         # The aligner returns numpy floats; convert them to plain Python floats
         # so the result is JSON-serializable (e.g. returned from FastAPI).
         words: list[Word] = []
@@ -152,6 +197,29 @@ class AudioCensor:
                     word[key] = float(segment[key])
             words.append(word)
         return words
+
+    @staticmethod
+    def _output_path(audio_path: str, output_path: str | None) -> Path:
+        """`output_path`, or "<name>_censored<ext>" next to the input."""
+        src = Path(audio_path)
+        return Path(output_path) if output_path else src.with_name(
+            f"{src.stem}_censored{src.suffix}"
+        )
+
+    def _write_unchanged(self, audio_path: str, output_path: str | None) -> str:
+        """The input as the output: copied byte for byte when the format is
+        the same (faster, and no re-encoding loss), else converted."""
+        src = Path(audio_path)
+        out = self._output_path(audio_path, output_path)
+        if out.suffix.lower() == src.suffix.lower():
+            shutil.copyfile(src, out)
+            return str(out)
+        try:
+            audio = AudioSegment.from_file(audio_path)
+        except CouldntDecodeError as exc:
+            raise AudioDecodeError(f"Could not decode {audio_path!r} as audio") from exc
+        audio.export(out, format=out.suffix.lstrip(".").lower() or "wav")
+        return str(out)
 
     def detect_profanity(self, words: list[Word]) -> list[Word]:
         """Set "flagged" on each word: True if it is profane or in the censor list.

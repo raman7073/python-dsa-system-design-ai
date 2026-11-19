@@ -7,19 +7,72 @@ authors = [
     { name = "Raman Mehta", email = "raman.mehta@fiftyfivetech.io" }
 ]
 requires-python = ">=3.13,<3.14"
+# What the API needs. The Celery worker additionally installs the `worker`
+# group (WhisperX and friends), so the API image stays small.
 dependencies = [
     "alembic>=1.20.1",
     "asyncpg>=0.32.0",
-    "audioop-lts>=0.2.2",
-    "better-profanity>=0.7.0",
+    "boto3>=1.44.6",
+    "celery[redis]>=5.7.0",
     "email-validator>=2.3.0",
     "fastapi[all]>=0.162.4",
     "pwdlib[argon2]>=0.4.2",
     "pydantic-settings>=2.16.2",
-    "pydub>=0.25.1",
     "pyjwt>=2.15.1",
     "scalar-fastapi>=1.10.0",
     "sqlalchemy[asyncio]>=2.1.9",
     "sqlmodel>=0.0.50",
+]
+
+# Linux (the Celery worker's Docker image) gets PyTorch's CPU-only build:
+# PyPI's Linux wheels bundle several GB of CUDA libraries this app never
+# uses, since it runs on CPU. Windows keeps PyPI's wheels (already CPU-only).
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+torchaudio = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[dependency-groups]
+# The censoring itself (app.audio_censor, app.worker.tasks). Installed in the
+# worker image with `uv sync --group worker`; never needed by the API.
+worker = [
+    "audioop-lts>=0.2.2",
+    "better-profanity>=0.7.0",
+    "pydub>=0.25.1",
+    # Pulled in by whisperx; listed directly only so [tool.uv.sources] above
+    # can pick the CPU build on Linux. Pinned to the versions whisperx resolved.
+    "torch==2.8.0",
+    "torchaudio==2.8.0",
+    "torchvision==0.23.0",
     "whisperx>=3.8.4",
+]
+dev = [
+    "boto3-stubs[s3]>=1.44.6",
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.5.0",
+]
+
+[tool.uv]
+# Locally, install everything (editor support and the worker tests need the
+# worker group). Docker images pick only what they need (see Dockerfile).
+default-groups = ["dev", "worker"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+# One event loop for the whole run, so the app's pooled DB connections
+# (opened on that loop) stay valid from one test to the next.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+filterwarnings = [
+    # Raised inside dependencies, not our code.
+    "ignore::DeprecationWarning:pyannote.*",
+    "ignore::UserWarning:pyannote.*",
+    "ignore::UserWarning:torchaudio.*",
 ]

@@ -2,40 +2,27 @@
 
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.audio_censor import AudioCensor
 from app.database.models import User
 from app.database.session import get_session
 from app.security import InvalidTokenError, decode_access_token
 from app.service.audio_service import AudioService
 from app.service.user_service import UserService
+from app.worker.celery_app import enqueue_censor
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
 
-def get_censor(request: Request) -> AudioCensor:
-    """The shared AudioCensor, created at startup in main.py's lifespan.
+def get_audio_service(session: SessionDep) -> AudioService:
+    """Censor jobs are queued on Redis for the Celery worker.
 
-    In tests that skip the lifespan, override this dependency instead:
-    app.dependency_overrides[get_censor] = lambda: fake_censor
+    In tests, override this to pass a fake queue instead:
+    app.dependency_overrides[get_audio_service] = lambda: AudioService(s, fake)
     """
-    censor = getattr(request.app.state, "censor", None)
-    if censor is None:
-        raise RuntimeError(
-            "AudioCensor is not initialised: app.state.censor is set in the "
-            "app's lifespan (app/main.py)."
-        )
-    return censor
-
-
-CensorDep = Annotated[AudioCensor, Depends(get_censor)]
-
-
-def get_audio_service(session: SessionDep, censor: CensorDep) -> AudioService:
-    return AudioService(session, censor)
+    return AudioService(session, enqueue_censor)
 
 
 AudioServiceDep = Annotated[AudioService, Depends(get_audio_service)]

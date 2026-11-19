@@ -1,12 +1,23 @@
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Optional
 from uuid import UUID, uuid4
 
+from sqlalchemy import Index, String, text
 from sqlmodel import Field, Relationship, SQLModel
 
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+class AudioStatus(StrEnum):
+    """Progress of a censor job (run by the Celery worker, app.worker.tasks)."""
+
+    PENDING = "pending"  # uploaded and queued
+    PROCESSING = "processing"  # a worker is censoring it
+    COMPLETED = "completed"  # censored file is ready to download
+    FAILED = "failed"  # see AudioFile.error
 
 
 # Relationship loading: the app uses AsyncSession, where an unloaded
@@ -24,17 +35,56 @@ class AudioFile(SQLModel, table=True):
     # SQLModel types __tablename__ as a declared_attr, so a plain string trips
     # type checkers even though it's the documented way to set the name.
     __tablename__ = "audio"  # pyright: ignore[reportAssignmentType]
+    __table_args__ = (
+        # A user's records newest first (GET /audio). Also serves every
+        # lookup by user_id alone, such as the foreign key.
+        Index("ix_audio_user_id_created_at", "user_id", "created_at", "id"),
+        # Only unfinished jobs, which are few: counting a user's active jobs
+        # (the upload cap) and finding stuck ones (recover_stuck_jobs) stay
+        # fast however many finished records pile up.
+        Index(
+            "ix_audio_active",
+            "user_id",
+            "status",
+            postgresql_where=text("status IN ('pending', 'processing')"),
+        ),
+    )
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     # Owner. Only they can read this record (see AudioService). Nullable
     # because rows created before uploads required login have no owner;
     # those rows can't be read through the API.
-    user_id: UUID | None = Field(default=None, foreign_key="users.id", index=True)
+    user_id: UUID | None = Field(default=None, foreign_key="users.id")
     # Relative to STORAGE_DIR, e.g. "uploads/<id>.mp3" (see app.storage).
     file_path: str
+    # Where the worker writes the censored file. Set at upload; the file only
+    # exists once status is COMPLETED.
     censored_file_path: str
+    # A plain string column rather than a database ENUM type, so adding a
+    # status later needs no type migration.
+    status: AudioStatus = Field(default=AudioStatus.PENDING, sa_type=String(20))
+    # Why the job failed, safe to show the client. Set only when FAILED.
+    error: str | None = None
+    # Job options, kept on the row so a lost job can be queued again.
+    padding_ms: int = 150
+    beep: bool = False
+    # Set when the job completes.
+    words_count: int | None = None
+    flagged_count: int | None = None
+    # How many times a worker has started this job. A job that keeps killing
+    # its worker (e.g. out of memory) is failed after MAX_JOB_ATTEMPTS.
+    attempts: int = 0
+    # The Celery task currently running the job. A redelivery of the same
+    # task (after a worker crash) may take it over; a different one may not.
+    task_id: str | None = Field(default=None, max_length=64)
     # Timezone-aware (UTC): SQLModel rejects naive datetimes, and the column
     # is TIMESTAMP WITH TIME ZONE.
     created_at: datetime = Field(default_factory=utc_now)
+    # When the job was last put on the queue (see recover_stuck_jobs).
+    queued_at: datetime | None = None
+    # When a worker last started the job.
+    started_at: datetime | None = None
+    # When the job finished, whether it completed or failed.
+    finished_at: datetime | None = None
 
     # ORM-only (no column): the owner, via user_id. Many audio -> one user.
     # Optional["User"] (a string) because User is defined below.

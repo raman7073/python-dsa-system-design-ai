@@ -1,0 +1,4 @@
+# Shell scripts run inside Linux containers: keep LF line endings even on a
+# Windows checkout (core.autocrlf would otherwise turn them into CRLF, which
+# breaks /bin/sh).
+*.sh text eol=lf

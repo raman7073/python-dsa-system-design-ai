@@ -9,7 +9,17 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.config import PROJECT_ROOT, settings
 
 # DB_URL must use an async driver, e.g. postgresql+asyncpg://...
-engine = create_async_engine(settings.DB_URL, echo=settings.DB_ECHO)
+engine = create_async_engine(
+    settings.DB_URL,
+    echo=settings.DB_ECHO,
+    # Check each connection before handing it out (a cheap round trip), so a
+    # Postgres restart doesn't fail the first request on every stale one.
+    pool_pre_ping=True,
+    # Connections kept open, and extra ones allowed under load. Each request
+    # holds one only briefly (none while an upload is being stored).
+    pool_size=settings.DB_POOL_SIZE,
+    max_overflow=settings.DB_MAX_OVERFLOW,
+)
 
 # expire_on_commit=False: keep loaded attributes usable after commit. With
 # async sessions an expired attribute can't lazily reload (that would need

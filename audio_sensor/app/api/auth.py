@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 
 from app.api.dependencies import CurrentUserDep, UserServiceDep
+from app.api.rate_limit import TOO_MANY_REQUESTS, limit_login, limit_signup
 from app.api.schemas import TokenData, UserCreate, UserRead
 from app.security import create_access_token
 from app.service.user_service import EmailAlreadyRegisteredError
@@ -16,9 +17,11 @@ router = APIRouter(prefix="/auth", tags=["auth"])
     summary="Create a user account",
     status_code=status.HTTP_201_CREATED,
     response_model=UserRead,
+    dependencies=[Depends(limit_signup)],
     responses={
         409: {"description": "An account with this email already exists."},
         422: {"description": "Invalid email or password (see `detail`)."},
+        **TOO_MANY_REQUESTS,
     },
 )
 async def signup(body: UserCreate, users: UserServiceDep) -> UserRead:
@@ -35,7 +38,8 @@ async def signup(body: UserCreate, users: UserServiceDep) -> UserRead:
     "/login",
     summary="Log in and get an access token",
     response_model=TokenData,
-    responses={401: {"description": "Incorrect email or password."}},
+    dependencies=[Depends(limit_login)],
+    responses={401: {"description": "Incorrect email or password."}, **TOO_MANY_REQUESTS},
 )
 async def login(
     form: Annotated[OAuth2PasswordRequestForm, Depends()], users: UserServiceDep

@@ -1,0 +1,169 @@
+# Local development services: Redis, the Celery worker and beat. The API
+# normally runs on the host (`uv run fastapi dev app/main.py`); a container
+# for it is available under the `api` profile.
+#   docker compose up -d --build              Redis, worker, beat
+#   docker compose --profile api up -d        ...and the API on port 8000
+#   docker compose --profile s3 up -d s3      local S3 server (STORAGE_BACKEND=s3)
+#   docker compose ps                         status / health
+#   docker compose logs -f worker             follow the worker's log
+#   docker compose restart worker beat        pick up changes to app/ code
+#   docker compose down                       stop (data is kept in volumes)
+#   docker compose down -v                    stop and DELETE data and models
+#
+# Settings: each service gets only the variables it uses (not the whole
+# .env), so e.g. the worker never sees JWT_SECRET_KEY. Values come from .env;
+# one that .env doesn't set is passed empty, which means "use the default"
+# (app/config.py).
+
+x-shared-env: &shared-env
+  DB_URL: ${DB_URL:?Set DB_URL in .env}
+  DB_ECHO: ${DB_ECHO:-}
+  DB_POOL_SIZE: ${DB_POOL_SIZE:-}
+  DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-}
+  # Inside Docker, Redis is reached by its service name.
+  REDIS_URL: redis://redis:6379/0
+  JOB_TIME_LIMIT_MINUTES: ${JOB_TIME_LIMIT_MINUTES:-}
+  # Storage (app/storage.py): "local" (the shared ./storage folder) or "s3".
+  # STORAGE_DIR is deliberately not passed: in the containers it is always
+  # /app/storage, the bind mount below.
+  STORAGE_BACKEND: ${STORAGE_BACKEND:-}
+  S3_BUCKET: ${S3_BUCKET:-}
+  S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
+  S3_REGION: ${S3_REGION:-}
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-}
+  S3_AUTO_CREATE_BUCKET: ${S3_AUTO_CREATE_BUCKET:-}
+
+x-worker-env: &worker-env
+  <<: *shared-env
+  MAX_JOB_ATTEMPTS: ${MAX_JOB_ATTEMPTS:-}
+  PENDING_REQUEUE_AFTER_MINUTES: ${PENDING_REQUEUE_AFTER_MINUTES:-}
+  WHISPER_MODEL: ${WHISPER_MODEL:-}
+  WHISPER_THREADS: ${WHISPER_THREADS:-}
+  WORKER_MAX_MEMORY_PER_CHILD_MB: ${WORKER_MAX_MEMORY_PER_CHILD_MB:-}
+  CENSOR_WORDS: ${CENSOR_WORDS:-}
+
+x-host-postgres: &host-postgres
+  # DB_URL (and S3_ENDPOINT_URL) in .env say "localhost"; the entrypoint maps
+  # them to the host.
+  # host.docker.internal is built in on Docker Desktop; needed on Linux.
+  - "host.docker.internal:host-gateway"
+
+services:
+  redis:
+    # Message broker for Celery, and the rate limiter's counters.
+    image: redis:8.2-alpine
+    container_name: audio-censor-redis
+    restart: unless-stopped
+    # Bound to localhost only: this Redis has no password, so it must not be
+    # reachable from other machines on the network.
+    ports:
+      - "127.0.0.1:6379:6379"
+    # appendonly: persist queued tasks to disk so they survive a restart.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  worker:
+    # Runs the censor jobs (app.worker.tasks): WhisperX on CPU.
+    build:
+      context: .
+      target: worker
+    image: audio-censor-worker
+    container_name: audio-censor-worker
+    restart: unless-stopped
+    # One job at a time: WhisperX already uses all CPU cores for a job, and
+    # each worker process holds its own copy of the models in memory.
+    command: ["celery", "-A", "app.worker.celery_app", "worker", "--loglevel=INFO", "--concurrency=1", "--hostname=worker@%h"]
+    environment: *worker-env
+    extra_hosts: *host-postgres
+    volumes:
+      # Shared with the API: it writes uploads, the worker writes the
+      # censored files.
+      - ./storage:/app/storage
+      # Live code: restart the worker to pick up changes without a rebuild.
+      - ./app:/app/app:ro
+      # Downloaded Whisper/alignment models, kept across rebuilds.
+      - model-cache:/home/app/.cache
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.worker.celery_app inspect ping -d worker@$$HOSTNAME --timeout 10"]
+      interval: 30s
+      timeout: 20s
+      start_period: 30s
+      retries: 3
+
+  beat:
+    # Celery's scheduler: every 5 minutes it queues recover_stuck_jobs,
+    # which re-queues jobs that were lost or whose worker died. Run exactly
+    # one beat, or the schedule fires once per copy.
+    image: audio-censor-worker
+    container_name: audio-censor-beat
+    restart: unless-stopped
+    command: ["celery", "-A", "app.worker.celery_app", "beat", "--loglevel=INFO", "--schedule=/tmp/celerybeat-schedule"]
+    environment: *worker-env
+    extra_hosts: *host-postgres
+    volumes:
+      - ./app:/app/app:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      worker:
+        condition: service_started
+
+  api:
+    # The API in a container (no WhisperX inside). Off by default: in
+    # development it runs on the host with auto-reload.
+    profiles: ["api"]
+    build:
+      context: .
+      target: api
+    image: audio-censor-api
+    container_name: audio-censor-api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    environment:
+      <<: *shared-env
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-}
+      MAX_ACTIVE_JOBS_PER_USER: ${MAX_ACTIVE_JOBS_PER_USER:-}
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-}
+      LOGIN_RATE_LIMIT_PER_MINUTE: ${LOGIN_RATE_LIMIT_PER_MINUTE:-}
+      SIGNUP_RATE_LIMIT_PER_HOUR: ${SIGNUP_RATE_LIMIT_PER_HOUR:-}
+      CENSOR_RATE_LIMIT_PER_HOUR: ${CENSOR_RATE_LIMIT_PER_HOUR:-}
+    extra_hosts: *host-postgres
+    volumes:
+      - ./storage:/app/storage
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  s3:
+    # S3-compatible object storage for local development (SeaweedFS), for
+    # STORAGE_BACKEND=s3 with S3_ENDPOINT_URL=http://127.0.0.1:8333. It
+    # accepts any credentials, so it is bound to localhost only. In
+    # production use AWS S3 (or another S3 service) instead.
+    profiles: ["s3"]
+    image: chrislusf/seaweedfs:3.97
+    container_name: audio-censor-s3
+    restart: unless-stopped
+    command: ["server", "-s3", "-dir=/data", "-ip.bind=0.0.0.0"]
+    ports:
+      - "127.0.0.1:8333:8333"
+    volumes:
+      - s3-data:/data
+
+volumes:
+  redis-data:
+  model-cache:
+  s3-data:

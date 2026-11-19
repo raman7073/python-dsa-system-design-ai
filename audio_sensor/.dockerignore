@@ -1,0 +1,15 @@
+# Only pyproject.toml, uv.lock, app/, alembic/, alembic.ini and docker/ are
+# needed in the images.
+.git
+.venv
+.vscode
+.env
+.env.*
+storage
+postman
+# alembic/ is needed by the API image (startup migration check).
+**/__pycache__
+**/*.py[cod]
+.ruff_cache
+.mypy_cache
+.pytest_cache

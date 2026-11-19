@@ -6,7 +6,7 @@ from uuid import UUID
 import jwt
 from pwdlib import PasswordHash
 
-from app.config import settings
+from app.config import get_api_settings
 
 # Argon2id with pwdlib's recommended parameters. Hashes embed their own
 # algorithm and parameters, so these can be tuned later without breaking
@@ -43,7 +43,7 @@ class InvalidTokenError(Exception):
 
 def create_access_token(user_id: UUID) -> tuple[str, int]:
     """Signed JWT for this user. Returns (token, lifetime in seconds)."""
-    lifetime = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    lifetime = timedelta(minutes=get_api_settings().ACCESS_TOKEN_EXPIRE_MINUTES)
     now = datetime.now(UTC)
     payload = {
         "sub": str(user_id),
@@ -52,7 +52,7 @@ def create_access_token(user_id: UUID) -> tuple[str, int]:
         "type": "access",
     }
     token = jwt.encode(
-        payload, settings.JWT_SECRET_KEY.get_secret_value(), algorithm=settings.JWT_ALGORITHM
+        payload, get_api_settings().JWT_SECRET_KEY.get_secret_value(), algorithm=get_api_settings().JWT_ALGORITHM
     )
     return token, int(lifetime.total_seconds())
 
@@ -62,9 +62,9 @@ def decode_access_token(token: str) -> UUID:
     try:
         payload = jwt.decode(
             token,
-            settings.JWT_SECRET_KEY.get_secret_value(),
+            get_api_settings().JWT_SECRET_KEY.get_secret_value(),
             # Pin the algorithm: never trust the one named in the token header.
-            algorithms=[settings.JWT_ALGORITHM],
+            algorithms=[get_api_settings().JWT_ALGORITHM],
             options={"require": ["sub", "exp", "iat"]},
         )
         if payload.get("type") != "access":

@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Audio Censor API",
-    "description": "Requests for the Audio Censor FastAPI app.\n\n**Before running:**\n1. Start the server: `uv run fastapi dev app/main.py` (from the `audio_sensor` folder).\n2. Wait for `Application startup complete`.\n3. If you run on a different port, change the `baseUrl` collection variable.\n\nThe `/censor` requests point at `C:\\Users\\Lenovo\\Downloads\\freesound_community-fuck-36089.mp3`. To use another file, open the request's **Body** tab and pick a file in the `file` row.\n\nFolders run in order: **Auth** signs up a fresh user and logs in (saving `accessToken`); **Censor** and **Audio** send that token, and **Censor** saves the new record's ID as `audioId` for **Audio**. `/censor` and `/audio/*` require login.\n\nUse **Send and Download** (arrow next to Send) to save the censored audio. Each request has checks in its **Tests** tab; results show in the response **Test Results** tab.",
+    "description": "Requests for the Audio Censor FastAPI app.\n\n**Before running:**\n1. Start Redis and the Celery worker: `docker compose up -d --build` (from the `audio_sensor` folder).\n2. Start the server: `uv run fastapi dev app/main.py` and wait for `Application startup complete`.\n3. If you run on a different port, change the `baseUrl` collection variable.\n\nThe `/censor` requests point at `C:\\Users\\Lenovo\\Downloads\\freesound_community-fuck-36089.mp3`. To use another file, open the request's **Body** tab and pick a file in the `file` row.\n\nFolders run in order: **Auth** signs up a fresh user and logs in (saving `accessToken`); **Censor** and **Audio** send that token, and **Censor** saves the new record's ID as `audioId` for **Audio**. `/censor` and `/audio/*` require login.\n\n`/censor` returns **202** straight away and the worker censors in the background; **Audio → Wait until processed** polls until it's done (automatic in the **Collection Runner**). Then use **Send and Download** on **Download censored file** to save the audio. Each request has checks in its **Tests** tab; results show in the response **Test Results** tab.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -33,6 +33,16 @@
     {
       "key": "accessToken",
       "value": "",
+      "type": "string"
+    },
+    {
+      "key": "failedAudioId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "pollCount",
+      "value": "0",
       "type": "string"
     }
   ],
@@ -787,25 +797,18 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
-                  "pm.test('Response is audio', () => {",
-                  "    pm.expect(pm.response.headers.get('Content-Type')).to.match(/^audio\\//);",
+                  "pm.test('Status is 202 Accepted', () => pm.response.to.have.status(202));",
+                  "const body = pm.response.json();",
+                  "pm.test('Job is queued as pending', () => {",
+                  "    pm.expect(body).to.have.all.keys('id', 'status', 'created_at', 'finished_at', 'words_count', 'flagged_count', 'error', 'censored_url', 'original_url');",
+                  "    pm.expect(body.status).to.eql('pending');",
+                  "    pm.expect(body.censored_url).to.eql(null);",
                   "});",
-                  "pm.test('Returned file is named *_censored.*', () => {",
-                  "    pm.expect(pm.response.headers.get('Content-Disposition')).to.include('_censored');",
+                  "pm.test('Location header points at the record', () => {",
+                  "    pm.expect(pm.response.headers.get('Location')).to.match(new RegExp(`/audio/${body.id}$`));",
                   "});",
-                  "pm.test('Word counts are reported', () => {",
-                  "    const words = parseInt(pm.response.headers.get('X-Words-Count'), 10);",
-                  "    const flagged = parseInt(pm.response.headers.get('X-Flagged-Count'), 10);",
-                  "    pm.expect(words).to.be.at.least(0);",
-                  "    pm.expect(flagged).to.be.within(0, words);",
-                  "    console.log(`words=${words}, flagged=${flagged}`);",
-                  "});",
-                  "pm.test('Body is not empty', () => pm.expect(pm.response.responseSize).to.be.above(0));",
-                  "",
-                  "const audioId = pm.response.headers.get('X-Audio-Id');",
-                  "if (audioId) pm.collectionVariables.set('audioId', audioId);",
-                  "pm.test('X-Audio-Id header is set', () => pm.expect(audioId).to.match(/^[0-9a-f-]{36}$/));"
+                  "pm.collectionVariables.set('audioId', body.id);",
+                  "pm.collectionVariables.set('pollCount', '0');"
                 ]
               }
             }
@@ -856,20 +859,18 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
-                  "pm.test('Response is audio', () => {",
-                  "    pm.expect(pm.response.headers.get('Content-Type')).to.match(/^audio\\//);",
+                  "pm.test('Status is 202 Accepted', () => pm.response.to.have.status(202));",
+                  "const body = pm.response.json();",
+                  "pm.test('Job is queued as pending', () => {",
+                  "    pm.expect(body).to.have.all.keys('id', 'status', 'created_at', 'finished_at', 'words_count', 'flagged_count', 'error', 'censored_url', 'original_url');",
+                  "    pm.expect(body.status).to.eql('pending');",
+                  "    pm.expect(body.censored_url).to.eql(null);",
                   "});",
-                  "pm.test('Word counts are reported', () => {",
-                  "    const words = parseInt(pm.response.headers.get('X-Words-Count'), 10);",
-                  "    const flagged = parseInt(pm.response.headers.get('X-Flagged-Count'), 10);",
-                  "    pm.expect(flagged).to.be.within(0, words);",
-                  "    console.log(`words=${words}, flagged=${flagged}`);",
+                  "pm.test('Location header points at the record', () => {",
+                  "    pm.expect(pm.response.headers.get('Location')).to.match(new RegExp(`/audio/${body.id}$`));",
                   "});",
-                  "",
-                  "const audioId = pm.response.headers.get('X-Audio-Id');",
-                  "if (audioId) pm.collectionVariables.set('audioId', audioId);",
-                  "pm.test('X-Audio-Id header is set', () => pm.expect(audioId).to.match(/^[0-9a-f-]{36}$/));"
+                  "pm.collectionVariables.set('audioId', body.id);",
+                  "pm.collectionVariables.set('pollCount', '0');"
                 ]
               }
             }
@@ -932,10 +933,10 @@
           "response": []
         },
         {
-          "name": "Error: non-audio file (400)",
+          "name": "Non-audio file (queued, then fails)",
           "request": {
             "method": "POST",
-            "description": "Upload any file that isn't audio (e.g. a .txt or this collection's .json). Expects 400.\n\nPick the file in the Body tab's `file` row before sending.",
+            "description": "Accepted like any upload: whether a file is decodable audio is only known once the worker tries it. **Audio → Wait for failed job** then checks it ends as `failed`.",
             "url": {
               "raw": "{{baseUrl}}/censor",
               "host": [
@@ -963,10 +964,18 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('Status is 400', () => pm.response.to.have.status(400));",
-                  "pm.test('Error message explains the problem', () => {",
-                  "    pm.expect(pm.response.json().detail).to.eql('Could not decode the upload as audio.');",
-                  "});"
+                  "pm.test('Status is 202 Accepted', () => pm.response.to.have.status(202));",
+                  "const body = pm.response.json();",
+                  "pm.test('Job is queued as pending', () => {",
+                  "    pm.expect(body).to.have.all.keys('id', 'status', 'created_at', 'finished_at', 'words_count', 'flagged_count', 'error', 'censored_url', 'original_url');",
+                  "    pm.expect(body.status).to.eql('pending');",
+                  "    pm.expect(body.censored_url).to.eql(null);",
+                  "});",
+                  "pm.test('Location header points at the record', () => {",
+                  "    pm.expect(pm.response.headers.get('Location')).to.match(new RegExp(`/audio/${body.id}$`));",
+                  "});",
+                  "pm.collectionVariables.set('failedAudioId', body.id);",
+                  "pm.collectionVariables.set('pollCount', '0');"
                 ]
               }
             }
@@ -1115,12 +1124,123 @@
           }
         ]
       },
-      "description": "Requires login: run **Auth → Sign up** and **Log in** first (they set `accessToken`, which this folder sends as a bearer token)."
+      "description": "Requires login: run **Auth → Sign up** and **Log in** first (they set `accessToken`, which this folder sends as a bearer token).\n\n`/censor` only queues the job and returns **202** at once; the Celery worker censors it in the background. **Audio → Wait until processed** waits for the result."
     },
     {
       "name": "Audio",
-      "description": "Read your own stored censor jobs (other users' audio returns 404). Requires login, and a **Censor audio** request first: it saves the new record's ID as `audioId`.",
+      "description": "Read your own stored censor jobs (other users' audio returns 404). Requires login, and the **Censor** folder first: it saves the new records' IDs as `audioId` and `failedAudioId`. Run it in the **Collection Runner** so **Wait until processed** can poll until the worker has finished.",
       "item": [
+        {
+          "name": "Wait until processed",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/audio/{{audioId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "audio",
+                "{{audioId}}"
+              ]
+            },
+            "description": "Polls the job until it finishes. In the **Collection Runner** it re-runs itself every 3 s (up to 10 minutes); when sending by hand, press Send again until `status` changes."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Wait between polls (not before the first one).",
+                  "const polls = parseInt(pm.collectionVariables.get('pollCount') || '0', 10);",
+                  "if (polls > 0) setTimeout(() => {}, 3000);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "const polls = parseInt(pm.collectionVariables.get('pollCount') || '0', 10);",
+                  "if (['pending', 'processing'].includes(body.status) && polls < 200) {",
+                  "    pm.collectionVariables.set('pollCount', String(polls + 1));",
+                  "    console.log(`job ${body.id} is ${body.status}; polling again (${polls + 1})`);",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
+                  "    return;",
+                  "}",
+                  "pm.collectionVariables.set('pollCount', '0');",
+                  "pm.test('Job ended as completed', () => pm.expect(body.status).to.eql('completed'));",
+                  "pm.test('finished_at is set', () => pm.expect(body.finished_at).to.be.a('string'));",
+                  "pm.test('Word counts are reported', () => {",
+                  "    pm.expect(body.words_count).to.be.at.least(0);",
+                  "    pm.expect(body.flagged_count).to.be.within(0, body.words_count);",
+                  "    console.log(`words=${body.words_count}, flagged=${body.flagged_count}`);",
+                  "});",
+                  "pm.test('Censored download link is set', () => pm.expect(body.censored_url).to.include('/file?variant=censored'));",
+                  "pm.test('No error', () => pm.expect(body.error).to.eql(null));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "List my audio",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/audio?limit=50&offset=0",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "audio"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "50"
+                },
+                {
+                  "key": "offset",
+                  "value": "0"
+                }
+              ]
+            },
+            "description": "All your stored jobs, newest first (`limit` 1-100, default 50; `offset` to page)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Returns a list of records', () => {",
+                  "    pm.expect(body).to.be.an('array');",
+                  "    body.forEach(r => pm.expect(r).to.have.all.keys('id', 'status', 'created_at', 'finished_at', 'words_count', 'flagged_count', 'error', 'censored_url', 'original_url'));",
+                  "});",
+                  "pm.test('Includes the last censored audio', () => {",
+                  "    pm.expect(body.map(r => r.id)).to.include(pm.collectionVariables.get('audioId'));",
+                  "});",
+                  "pm.test('Newest first', () => {",
+                  "    const times = body.map(r => Date.parse(r.created_at));",
+                  "    pm.expect(times).to.eql([...times].sort((a, b) => b - a));",
+                  "});",
+                  "pm.test('No internal storage paths exposed', () => {",
+                  "    pm.expect(pm.response.text()).to.not.include('storage');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
         {
           "name": "Get audio record",
           "request": {
@@ -1145,8 +1265,8 @@
                 "exec": [
                   "pm.test('Status is 200', () => pm.response.to.have.status(200));",
                   "const body = pm.response.json();",
-                  "pm.test('Has id, created_at and download URLs', () => {",
-                  "    pm.expect(body).to.have.all.keys('id', 'created_at', 'censored_url', 'original_url');",
+                  "pm.test('Has the job fields and download URLs', () => {",
+                  "    pm.expect(body).to.have.all.keys('id', 'status', 'created_at', 'finished_at', 'words_count', 'flagged_count', 'error', 'censored_url', 'original_url');",
                   "    pm.expect(body.id).to.eql(pm.collectionVariables.get('audioId'));",
                   "});",
                   "pm.test('URLs point at the file endpoint', () => {",
@@ -1232,6 +1352,96 @@
                   "pm.test('Status is 200', () => pm.response.to.have.status(200));",
                   "pm.test('Response is audio', () => pm.expect(pm.response.headers.get('Content-Type')).to.match(/^audio\\//));",
                   "pm.test('Not the censored file', () => pm.expect(pm.response.headers.get('Content-Disposition')).to.not.include('_censored'));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Wait for failed job",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/audio/{{failedAudioId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "audio",
+                "{{failedAudioId}}"
+              ]
+            },
+            "description": "Polls the job until it finishes. In the **Collection Runner** it re-runs itself every 3 s (up to 10 minutes); when sending by hand, press Send again until `status` changes."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Wait between polls (not before the first one).",
+                  "const polls = parseInt(pm.collectionVariables.get('pollCount') || '0', 10);",
+                  "if (polls > 0) setTimeout(() => {}, 3000);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "const polls = parseInt(pm.collectionVariables.get('pollCount') || '0', 10);",
+                  "if (['pending', 'processing'].includes(body.status) && polls < 200) {",
+                  "    pm.collectionVariables.set('pollCount', String(polls + 1));",
+                  "    console.log(`job ${body.id} is ${body.status}; polling again (${polls + 1})`);",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
+                  "    return;",
+                  "}",
+                  "pm.collectionVariables.set('pollCount', '0');",
+                  "pm.test('Job ended as failed', () => pm.expect(body.status).to.eql('failed'));",
+                  "pm.test('finished_at is set', () => pm.expect(body.finished_at).to.be.a('string'));",
+                  "pm.test('Explains why it failed', () => pm.expect(body.error).to.eql('Could not decode the upload as audio.'));",
+                  "pm.test('No censored download link', () => pm.expect(body.censored_url).to.eql(null));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Error: download failed job (409)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/audio/{{failedAudioId}}/file?variant=censored",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "audio",
+                "{{failedAudioId}}",
+                "file"
+              ],
+              "query": [
+                {
+                  "key": "variant",
+                  "value": "censored"
+                }
+              ]
+            },
+            "description": "A job that failed (or is still running) has no censored file."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 409', () => pm.response.to.have.status(409));",
+                  "pm.test('Says the job failed', () => pm.expect(pm.response.json().detail).to.include('failed'));"
                 ]
               }
             }

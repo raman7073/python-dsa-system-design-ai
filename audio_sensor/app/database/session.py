@@ -1,10 +1,12 @@
 from collections.abc import AsyncIterator
 
+from alembic.config import Config
+from alembic.runtime.migration import MigrationContext
+from alembic.script import ScriptDirectory
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.config import settings
+from app.config import PROJECT_ROOT, settings
 
 # DB_URL must use an async driver, e.g. postgresql+asyncpg://...
 engine = create_async_engine(settings.DB_URL, echo=settings.DB_ECHO)
@@ -23,15 +25,31 @@ async def get_session() -> AsyncIterator[AsyncSession]:
         yield session
 
 
-async def init_db() -> None:
-    # create_all only knows about tables whose model classes have been
-    # imported, so import the models here to register them first.
-    from app.database import models  # noqa: F401
+class SchemaOutOfDateError(RuntimeError):
+    """The database hasn't had the latest Alembic migrations applied."""
 
-    # metadata.create_all is synchronous; run_sync runs it on the async
-    # connection.
-    async with engine.begin() as conn:
-        await conn.run_sync(SQLModel.metadata.create_all)
+
+async def check_db_schema() -> None:
+    """Fail fast at startup if the database isn't at the latest migration.
+
+    The schema is managed only by Alembic (alembic/versions); the app never
+    creates or alters tables itself. Apply migrations with:
+        uv run alembic upgrade head
+    Also fails immediately if the database is unreachable.
+    """
+    alembic_cfg = Config(str(PROJECT_ROOT / "alembic.ini"))
+    head = ScriptDirectory.from_config(alembic_cfg).get_current_head()
+
+    async with engine.connect() as conn:
+        current = await conn.run_sync(
+            lambda sync_conn: MigrationContext.configure(sync_conn).get_current_revision()
+        )
+
+    if current != head:
+        raise SchemaOutOfDateError(
+            f"Database schema is at revision {current or '<none>'}, but the latest "
+            f"migration is {head}. Run: uv run alembic upgrade head"
+        )
 
 
 async def close_db() -> None:

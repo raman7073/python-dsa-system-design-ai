@@ -7,15 +7,16 @@ from app.api.audio import router as audio_router
 from app.api.auth import router as auth_router
 from app.audio_censor import AudioCensor
 from app.config import settings
-from app.database.session import close_db, init_db
+from app.database.session import check_db_schema, close_db
 from app.storage import ensure_storage_dirs
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Create missing tables first: it's fast and fails immediately if the
-    # database is unreachable, instead of after the slow model load below.
-    await init_db()
+    # Check the database first: it's fast, and fails immediately if the
+    # database is unreachable or migrations haven't been applied, instead of
+    # after the slow model load below.
+    await check_db_schema()
     ensure_storage_dirs()
 
     # One shared instance for all requests (see app.api.dependencies.get_censor).

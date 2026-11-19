@@ -1,17 +1,21 @@
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 
-from app.api.dependencies import AudioServiceDep
+from app.api.dependencies import AudioServiceDep, CurrentUserDep
 from app.api.schemas import AudioRead
 from app.audio_censor import AudioDecodeError
 from app.config import settings
 from app.service.audio_service import AudioNotFoundError, AudioVariant
 from app.storage import OUTPUT_MEDIA_TYPES, UploadTooLargeError
 
-router = APIRouter(tags=["censor"])
+# Every route here requires a bearer token (`user: CurrentUserDep`), and users
+# only ever see their own audio.
+UNAUTHORIZED: dict[int | str, dict[str, Any]] = {401: {"description": "Missing, invalid or expired token."}}
+
+router = APIRouter(tags=["censor"], responses=UNAUTHORIZED)
 
 
 @router.post(
@@ -34,6 +38,7 @@ router = APIRouter(tags=["censor"])
     },
 )
 async def censor_endpoint(
+    user: CurrentUserDep,
     service: AudioServiceDep,
     file: Annotated[UploadFile, File(description="Audio file (wav, mp3, flac, ogg, m4a, ...).")],
     beep: Annotated[
@@ -47,7 +52,7 @@ async def censor_endpoint(
     # async endpoint doesn't block the event loop.
     try:
         result = await service.censor_upload(
-            file.filename, file.file, padding_ms=padding_ms, beep=beep
+            user.id, file.filename, file.file, padding_ms=padding_ms, beep=beep
         )
     except UploadTooLargeError as exc:
         raise HTTPException(413, f"Upload exceeds {settings.MAX_UPLOAD_MB} MB.") from exc
@@ -71,11 +76,13 @@ async def censor_endpoint(
     tags=["audio"],
     summary="Get a stored audio record",
     response_model=AudioRead,
-    responses={404: {"description": "No audio with this ID."}},
+    responses={404: {"description": "No audio with this ID among your uploads."}},
 )
-async def read_audio(audio_id: UUID, service: AudioServiceDep, request: Request) -> AudioRead:
+async def read_audio(
+    audio_id: UUID, user: CurrentUserDep, service: AudioServiceDep, request: Request
+) -> AudioRead:
     try:
-        record = await service.get_audio(audio_id)
+        record = await service.get_audio(audio_id, user.id)
     except AudioNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
 
@@ -96,18 +103,19 @@ async def read_audio(audio_id: UUID, service: AudioServiceDep, request: Request)
     response_class=FileResponse,
     responses={
         200: {"description": "The censored file (default) or the original upload."},
-        404: {"description": "No audio with this ID, or its file is missing."},
+        404: {"description": "No audio with this ID among your uploads, or its file is missing."},
     },
 )
 async def read_audio_file(
     audio_id: UUID,
+    user: CurrentUserDep,
     service: AudioServiceDep,
     variant: Annotated[
         AudioVariant, Query(description="`censored` (default) or `original`.")
     ] = AudioVariant.CENSORED,
 ):
     try:
-        stored = await service.get_audio_file(audio_id, variant)
+        stored = await service.get_audio_file(audio_id, user.id, variant)
     except AudioNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
 

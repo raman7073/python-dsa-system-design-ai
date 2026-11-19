@@ -59,4 +59,6 @@ class Settings(BaseSettings):
         return self.MAX_UPLOAD_MB * 1024 * 1024
 
 
-settings = Settings()
+# DB_URL and JWT_SECRET_KEY have no defaults: pydantic-settings fills them from
+# the environment / .env at runtime, which type checkers can't see.
+settings = Settings()  # pyright: ignore[reportCallIssue]

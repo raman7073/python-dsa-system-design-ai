@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import BinaryIO
 from uuid import UUID, uuid4
 
+from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.audio_censor import AudioCensor, Word
@@ -53,7 +54,7 @@ class CensorResult:
 
     @property
     def flagged_count(self) -> int:
-        return sum(w["flagged"] for w in self.words)
+        return sum(1 for w in self.words if w.get("flagged"))
 
 
 class AudioService:
@@ -74,12 +75,14 @@ class AudioService:
 
     async def censor_upload(
         self,
+        owner_id: UUID,
         filename: str | None,
         data: BinaryIO,
         padding_ms: int = 150,
         beep: bool = False,
     ) -> CensorResult:
-        """Save the upload, censor it, and record both files in the database.
+        """Save the upload, censor it, and record both files in the database
+        as belonging to `owner_id`.
 
         Nothing is kept unless both files and the DB row were written: on any
         failure the transaction is rolled back and the files are deleted.
@@ -110,6 +113,7 @@ class AudioService:
 
             record = AudioFile(
                 id=audio_id,
+                user_id=owner_id,
                 file_path=to_stored_path(src),
                 censored_file_path=to_stored_path(out),
             )
@@ -130,22 +134,31 @@ class AudioService:
             download_filename=f"{Path(filename or 'audio').stem}_censored{out_suffix}",
         )
 
-    async def get_audio(self, audio_id: UUID) -> AudioFile:
-        """The `audio` record for this ID. Raises AudioNotFoundError."""
-        record = await self.session.get(AudioFile, audio_id)
+    async def get_audio(self, audio_id: UUID, owner_id: UUID) -> AudioFile:
+        """`owner_id`'s audio record with this ID. Raises AudioNotFoundError.
+
+        Someone else's record is reported as not found, the same as an ID
+        that doesn't exist, so callers can't probe which IDs exist.
+        """
+        record = await self.session.scalar(
+            select(AudioFile).where(AudioFile.id == audio_id, AudioFile.user_id == owner_id)
+        )
         if record is None:
             raise AudioNotFoundError(f"No audio with id {audio_id}")
         return record
 
     async def get_audio_file(
-        self, audio_id: UUID, variant: AudioVariant = AudioVariant.CENSORED
+        self,
+        audio_id: UUID,
+        owner_id: UUID,
+        variant: AudioVariant = AudioVariant.CENSORED,
     ) -> StoredAudioFile:
-        """The censored or original file of a stored record.
+        """The censored or original file of `owner_id`'s record.
 
-        Raises AudioNotFoundError if the record doesn't exist or its file has
-        been removed from storage.
+        Raises AudioNotFoundError if the record doesn't exist, belongs to
+        someone else, or its file has been removed from storage.
         """
-        record = await self.get_audio(audio_id)
+        record = await self.get_audio(audio_id, owner_id)
         stored = (
             record.censored_file_path
             if variant is AudioVariant.CENSORED

@@ -129,6 +129,7 @@ class AudioCensor:
 
         with self._model_lock:
             self._load_models_unlocked()
+            assert self._asr_model is not None  # set by _load_models_unlocked()
             result = self._asr_model.transcribe(
                 audio, batch_size=self.batch_size, language=self.LANGUAGE
             )
@@ -143,10 +144,14 @@ class AudioCensor:
 
         # The aligner returns numpy floats; convert them to plain Python floats
         # so the result is JSON-serializable (e.g. returned from FastAPI).
-        return [
-            {key: val if key == "word" else float(val) for key, val in word.items()}
-            for word in aligned["word_segments"]
-        ]
+        words: list[Word] = []
+        for segment in aligned["word_segments"]:
+            word = Word(word=segment["word"])
+            for key in ("start", "end", "score"):
+                if key in segment:
+                    word[key] = float(segment[key])
+            words.append(word)
+        return words
 
     def detect_profanity(self, words: list[Word]) -> list[Word]:
         """Set "flagged" on each word: True if it is profane or in the censor list.
@@ -261,9 +266,9 @@ if __name__ == "__main__":
         start = f"{w['start']:.3f}" if "start" in w else "-"
         end = f"{w['end']:.3f}" if "end" in w else "-"
         score = f"{w['score']:.2f}" if "score" in w else "-"
-        flagged = "YES" if w["flagged"] else "no"
+        flagged = "YES" if w.get("flagged") else "no"
         print(f"{start:>7}  {end:>7}  {score:>5}  {flagged:<7}  {w['word']}")
 
-    flagged_count = sum(w["flagged"] for w in words)
+    flagged_count = sum(1 for w in words if w.get("flagged"))
     print(f"\n{len(words)} words, {flagged_count} flagged")
     print(f"Censored audio saved to: {out_path}")

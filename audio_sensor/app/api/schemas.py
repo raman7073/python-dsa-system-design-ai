@@ -53,6 +53,14 @@ class UserCreate(BaseModel):
         return password
 
 
+class TokenData(BaseModel):
+    """Login response (OAuth2 bearer token)."""
+
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int = Field(description="Seconds until the token expires.")
+
+
 class UserRead(BaseModel):
     """A user as returned by the API (never includes the password hash)."""
 

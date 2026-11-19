@@ -1,6 +1,7 @@
 from pathlib import Path
+from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Project root (the folder containing pyproject.toml), resolved from this
@@ -27,6 +28,14 @@ class Settings(BaseSettings):
     # Log every SQL statement (with parameters). Useful locally, noisy and
     # potentially sensitive elsewhere.
     DB_ECHO: bool = False
+
+    # JWT signing. The secret is a SecretStr so it never shows up in logs or
+    # reprs; generate one with: python -c "import secrets; print(secrets.token_urlsafe(64))"
+    JWT_SECRET_KEY: SecretStr = Field(min_length=32)
+    # HMAC algorithms only: they sign with the shared secret above. (RS*/ES*
+    # would need a private/public key pair instead.)
+    JWT_ALGORITHM: Literal["HS256", "HS384", "HS512"] = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=30, gt=0)
 
     # Where uploaded and censored audio files are kept. Relative paths are
     # resolved against the project root.

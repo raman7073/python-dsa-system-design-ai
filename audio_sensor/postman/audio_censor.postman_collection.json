@@ -29,6 +29,11 @@
       "key": "userId",
       "value": "",
       "type": "string"
+    },
+    {
+      "key": "accessToken",
+      "value": "",
+      "type": "string"
     }
   ],
   "item": [
@@ -562,7 +567,7 @@
     },
     {
       "name": "Auth",
-      "description": "User signup. **Sign up** generates a fresh email each run (saved as `signupEmail`), so it never collides with an existing account; the duplicate requests reuse it.",
+      "description": "Signup, login and the current user. Run in order: **Sign up** generates a fresh email each run (saved as `signupEmail`), **Log in** saves `accessToken`, and **Get current user** uses it.",
       "item": [
         {
           "name": "Sign up",
@@ -997,6 +1002,264 @@
                   "const err = pm.response.json().detail[0];",
                   "pm.test('Error is on password', () => pm.expect(err.loc).to.include('password'));",
                   "pm.test('Message mentions: Field required', () => pm.expect(err.msg).to.include('Field required'));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Log in",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {
+                  "key": "username",
+                  "value": "{{signupEmail}}",
+                  "type": "text",
+                  "description": "Your email"
+                },
+                {
+                  "key": "password",
+                  "value": "correct-horse-42",
+                  "type": "text"
+                }
+              ]
+            },
+            "description": "OAuth2 password flow: form fields `username` (your email) and `password`, sent as `x-www-form-urlencoded`. Run **Sign up** first; this logs in as that account and saves the token as `accessToken`."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Returns a bearer token', () => {",
+                  "    pm.expect(body).to.have.all.keys('access_token', 'token_type', 'expires_in');",
+                  "    pm.expect(body.token_type).to.eql('bearer');",
+                  "    pm.expect(body.access_token.split('.')).to.have.lengthOf(3);",
+                  "});",
+                  "pm.test('expires_in is positive', () => pm.expect(body.expires_in).to.be.above(0));",
+                  "pm.collectionVariables.set('accessToken', body.access_token);"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Error: wrong password (401)",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {
+                  "key": "username",
+                  "value": "{{signupEmail}}",
+                  "type": "text",
+                  "description": "Your email"
+                },
+                {
+                  "key": "password",
+                  "value": "wrong-pass-99",
+                  "type": "text"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 401', () => pm.response.to.have.status(401));",
+                  "pm.test('Asks for a bearer token', () => pm.expect(pm.response.headers.get('WWW-Authenticate')).to.eql('Bearer'));",
+                  "pm.test('Generic message', () => pm.expect(pm.response.json().detail).to.eql('Incorrect email or password.'));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Error: unknown email (401)",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {
+                  "key": "username",
+                  "value": "nobody.{{$timestamp}}@example.com",
+                  "type": "text",
+                  "description": "Your email"
+                },
+                {
+                  "key": "password",
+                  "value": "correct-horse-42",
+                  "type": "text"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 401', () => pm.response.to.have.status(401));",
+                  "pm.test('Asks for a bearer token', () => pm.expect(pm.response.headers.get('WWW-Authenticate')).to.eql('Bearer'));",
+                  "pm.test('Same message as wrong password (no account enumeration)', () => pm.expect(pm.response.json().detail).to.eql('Incorrect email or password.'));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Get current user (me)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/auth/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "me"
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Sends `Authorization: Bearer {{accessToken}}` (set by **Log in**)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Is the logged-in user', () => pm.expect(body.email).to.eql(pm.collectionVariables.get('signupEmail').toLowerCase()));",
+                  "pm.test('Never returns the password', () => pm.expect(pm.response.text().toLowerCase()).to.not.include('password'));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Error: me without token (401)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/auth/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "me"
+              ]
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 401', () => pm.response.to.have.status(401));",
+                  "pm.test('Asks for a bearer token', () => pm.expect(pm.response.headers.get('WWW-Authenticate')).to.eql('Bearer'));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Error: me with invalid token (401)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/auth/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "me"
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "not.a.valid-token",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 401', () => pm.response.to.have.status(401));",
+                  "pm.test('Asks for a bearer token', () => pm.expect(pm.response.headers.get('WWW-Authenticate')).to.eql('Bearer'));"
                 ]
               }
             }

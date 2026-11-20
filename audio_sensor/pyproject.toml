@@ -54,6 +54,7 @@ worker = [
 ]
 dev = [
     "boto3-stubs[s3]>=1.44.6",
+    "moto[s3]>=5.2.5",  # in-memory S3 for tests/test_storage.py
     "pytest>=9.2.0",
     "pytest-asyncio>=1.5.0",
 ]

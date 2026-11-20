@@ -159,9 +159,26 @@ Uploads and censored files are stored by key (`uploads/<id>.mp3`,
 - **`s3`**: an S3 bucket (AWS S3, or any S3-compatible store), so the API and
   any number of workers can run on different machines. Downloads are
   streamed through the API, so links stay behind login, and the S3
-  connection is closed even if the client disconnects mid-download. For local testing,
-  `docker compose --profile s3 up -d s3` starts a SeaweedFS S3 server on
-  `127.0.0.1:8333`; see `.env.example` for the matching settings.
+  connection is closed even if the client disconnects mid-download. See
+  `.env.example` for the settings. The tests use moto's in-memory S3, so
+  they never touch a real bucket.
+
+  The IAM user (or role) needs this on the bucket, and nothing more:
+
+  ```json
+  {
+    "Version": "2012-10-17",
+    "Statement": [
+      {"Effect": "Allow", "Action": "s3:ListBucket",
+       "Resource": "arn:aws:s3:::YOUR-BUCKET"},
+      {"Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+       "Resource": "arn:aws:s3:::YOUR-BUCKET/*"}
+    ]
+  }
+  ```
+
+  `s3:ListBucket` is what lets the API's startup check (HeadBucket) pass,
+  and lets a missing file come back as 404 rather than 403.
 
 Switching backends doesn't move existing files: records created before the
 switch point at files the new backend doesn't have.
@@ -189,7 +206,6 @@ the API runs on the host.
 |---|---|
 | `docker compose up -d --build` | Build and start Redis, worker and beat |
 | `docker compose --profile api up -d` | Also run the API in a container (port `API_PORT`, default 8000) |
-| `docker compose --profile s3 up -d s3` | Start the local S3 server |
 | `docker compose ps` | Status |
 | `docker compose logs -f worker` | Follow the worker's log (jobs, errors) |
 | `docker compose restart worker beat` | Pick up code changes |

@@ -3,7 +3,6 @@
 # for it is available under the `api` profile.
 #   docker compose up -d --build              Redis, worker, beat
 #   docker compose --profile api up -d        ...and the API on port 8000
-#   docker compose --profile s3 up -d s3      local S3 server (STORAGE_BACKEND=s3)
 #   docker compose ps                         status / health
 #   docker compose logs -f worker             follow the worker's log
 #   docker compose restart worker beat        pick up changes to app/ code
@@ -160,22 +159,6 @@ services:
       start_period: 20s
       retries: 3
 
-  s3:
-    # S3-compatible object storage for local development (SeaweedFS), for
-    # STORAGE_BACKEND=s3 with S3_ENDPOINT_URL=http://127.0.0.1:8333. It
-    # accepts any credentials, so it is bound to localhost only. In
-    # production use AWS S3 (or another S3 service) instead.
-    profiles: ["s3"]
-    image: chrislusf/seaweedfs:3.97
-    container_name: audio-censor-s3
-    restart: unless-stopped
-    command: ["server", "-s3", "-dir=/data", "-ip.bind=0.0.0.0"]
-    ports:
-      - "127.0.0.1:8333:8333"
-    volumes:
-      - s3-data:/data
-
 volumes:
   redis-data:
   model-cache:
-  s3-data:

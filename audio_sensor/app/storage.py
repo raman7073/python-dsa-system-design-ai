@@ -245,13 +245,31 @@ class S3Storage:
         )
 
     def ensure_ready(self) -> None:
+        from botocore.exceptions import ClientError
+
         try:
             self.client.head_bucket(Bucket=self.bucket)
         except Exception as exc:
+            if isinstance(exc, ClientError) and exc.response.get("Error", {}).get("Code") == "403":
+                # HeadBucket's 403 has no message: say what to check.
+                raise PermissionError(
+                    f"Access to S3 bucket {self.bucket!r} was denied. Check the "
+                    "bucket name, and that the credentials allow s3:ListBucket on "
+                    "it and s3:GetObject/PutObject/DeleteObject on its objects "
+                    "(see README, Storage)."
+                ) from exc
             if not (self._is_missing(exc) and self.auto_create_bucket):
                 raise
-            logger.info("Creating bucket %r", self.bucket)
-            self.client.create_bucket(Bucket=self.bucket)
+            region = self.client.meta.region_name
+            logger.info("Creating bucket %r in %s", self.bucket, region)
+            if region in (None, "us-east-1"):
+                self.client.create_bucket(Bucket=self.bucket)
+            else:
+                # AWS refuses a create outside us-east-1 without the region.
+                self.client.create_bucket(
+                    Bucket=self.bucket,
+                    CreateBucketConfiguration={"LocationConstraint": region},  # type: ignore[typeddict-item]
+                )
 
     def save(self, key: str, source: BinaryIO, max_bytes: int) -> None:
         extra = {"ContentType": media_type_for(key)}
@@ -280,10 +298,21 @@ class S3Storage:
         return True
 
     def delete(self, *keys: str) -> None:
-        if keys:
-            self.client.delete_objects(
-                Bucket=self.bucket,
-                Delete={"Objects": [{"Key": k} for k in keys], "Quiet": True},
+        if not keys:
+            return
+        result = self.client.delete_objects(
+            Bucket=self.bucket,
+            Delete={"Objects": [{"Key": k} for k in keys], "Quiet": True},
+        )
+        # S3 reports per-key failures (e.g. AccessDenied) in the response,
+        # not as an exception. Deletes are cleanup after the database has
+        # changed, so log them (the files are left behind) rather than fail.
+        if failed := result.get("Errors"):
+            logger.error(
+                "Could not delete %d object(s) from bucket %r: %s",
+                len(failed),
+                self.bucket,
+                ", ".join(f"{e.get('Key')} ({e.get('Code')})" for e in failed),
             )
 
     @contextmanager

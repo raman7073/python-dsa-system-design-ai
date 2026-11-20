@@ -5,12 +5,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from scalar_fastapi import add_scalar_reference
 
-from app.api.audio import router as audio_router
-from app.api.auth import router as auth_router
 from app.api.body_limit import FORM_OVERHEAD_BYTES, BodySizeLimitMiddleware
-from app.api.health import router as health_router
 from app.api.rate_limit import rate_limiter
-from app.api.sound_effects import router as sound_effects_router
+from app.api.routers import api_router
 from app.config import get_api_settings
 from app.database.session import check_db_schema, close_db
 from app.storage import get_storage
@@ -61,7 +58,4 @@ if get_api_settings().CORS_ORIGINS:
         max_age=600,
     )
 add_scalar_reference(app)  # interactive API docs at /scalar
-app.include_router(audio_router)
-app.include_router(auth_router)
-app.include_router(sound_effects_router)
-app.include_router(health_router)
+app.include_router(api_router)

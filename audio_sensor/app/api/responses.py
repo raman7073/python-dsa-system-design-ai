@@ -1,4 +1,5 @@
-"""Serving stored files (audio and sound effects) from either storage backend."""
+"""Shared response pieces: the 401 entry for the docs, and serving stored
+files (audio and sound effects) from either storage backend."""
 
 from typing import Any
 
@@ -8,6 +9,11 @@ from starlette.responses import Response
 from starlette.types import Receive, Scope, Send
 
 from app.storage import Download
+
+# For routers whose every route needs a login (`responses=UNAUTHORIZED`).
+UNAUTHORIZED: dict[int | str, dict[str, Any]] = {
+    401: {"description": "Missing, invalid or expired token."}
+}
 
 
 async def download_response(

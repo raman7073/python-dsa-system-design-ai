@@ -13,8 +13,8 @@ from pydub.generators import Sine
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from app.api import health
 from app.api.dependencies import get_audio_service, get_current_user
+from app.api.routers import health
 from app.audio_censor import AudioCensor, AudioTooLongError, Word, _load_audio
 from app.config import settings
 from app.database.models import AudioStatus, CensorMode, JobStage, SoundEffect, User

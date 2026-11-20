@@ -1,6 +1,10 @@
+"""Audio routes: upload for censoring (POST /censor), then the records
+(GET/PATCH /audio/{id}) and their results: the audio file, the
+transcript and subtitles."""
+
 from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Annotated, Any
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import (
@@ -20,7 +24,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from app.api.dependencies import AudioServiceDep, CurrentUserDep
 from app.api.pagination import decode_cursor, encode_cursor
 from app.api.rate_limit import limit_censor
-from app.api.responses import download_response
+from app.api.responses import UNAUTHORIZED, download_response
 from app.api.schemas import (
     AudioRead,
     AudioSettingsUpdate,
@@ -50,12 +54,9 @@ from app.storage import UploadTooLargeError
 from app.subtitles import subtitles
 
 # Every route here requires a bearer token (`user: CurrentUserDep`), and users
-# only ever see their own audio.
-UNAUTHORIZED: dict[int | str, dict[str, Any]] = {
-    401: {"description": "Missing, invalid or expired token."}
-}
-
-router = APIRouter(tags=["censor"], responses=UNAUTHORIZED)
+# only ever see their own audio. Tags are set per route: POST /censor is
+# "censor", the rest "audio" (a router-level tag would be added to both).
+router = APIRouter(responses=UNAUTHORIZED)
 
 INVALID_SETTINGS = (
     "Invalid settings: bad custom words, a sound effect that isn't yours or "
@@ -102,8 +103,12 @@ def _http_errors() -> Generator[None]:
         ) from exc
 
 
+# --- Upload --------------------------------------------------------------------
+
+
 @router.post(
     "/censor",
+    tags=["censor"],
     summary="Queue an audio file for censoring",
     status_code=status.HTTP_202_ACCEPTED,
     response_model=AudioRead,
@@ -192,6 +197,9 @@ async def censor_endpoint(
     return AudioRead.from_record(record, request)
 
 
+# --- Records: list, read, change settings --------------------------------------
+
+
 @router.get(
     "/audio",
     tags=["audio"],
@@ -264,6 +272,95 @@ async def read_audio(
     return AudioRead.from_record(record, request)
 
 
+@router.patch(
+    "/audio/{audio_id}",
+    tags=["audio"],
+    summary="Change a job's censor settings and re-run it",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=AudioRead,
+    # A re-run uses the worker like an upload, so it shares /censor's budget.
+    dependencies=[Depends(limit_censor)],
+    responses={
+        200: {"description": "Nothing changed: the settings were already these."},
+        202: {
+            "description": "Queued (`status`: pending). New custom words re-run "
+            "detection and rendering; any other change re-runs rendering only. The "
+            "audio isn't transcribed again. Poll GET /audio/{id} as after an upload."
+        },
+        404: {"description": "No audio with this ID among your uploads."},
+        409: {
+            "description": "The job is still pending or processing, or it has no "
+            "stored transcript to re-run from (it failed before transcription, or "
+            "ran before transcripts were kept: upload it again)."
+        },
+        422: {"description": INVALID_SETTINGS},
+        429: {"description": TOO_MANY},
+        503: {"description": "The job queue is unavailable; nothing was changed."},
+    },
+)
+async def update_audio_settings(
+    audio_id: UUID,
+    body: AudioSettingsUpdate,
+    user: CurrentUserDep,
+    service: AudioServiceDep,
+    request: Request,
+    response: Response,
+) -> AudioRead:
+    """Send only the settings to change; the rest keep their current value."""
+    with _http_errors():
+        # exclude_none: null means "keep" (an empty custom_words list still
+        # goes through, and removes the words).
+        record = await service.update_settings(
+            audio_id, user.id, **body.model_dump(exclude_none=True)
+        )
+    if record.status != AudioStatus.PENDING:
+        response.status_code = status.HTTP_200_OK  # nothing changed, nothing queued
+    return AudioRead.from_record(record, request)
+
+
+# --- Results: the audio file, the transcript, subtitles ------------------------
+
+
+# HEAD is a separate, unlisted route: one route with both methods gives
+# them the same OpenAPI operation id.
+@router.head("/audio/{audio_id}/file", include_in_schema=False)
+@router.get(
+    "/audio/{audio_id}/file",
+    name="read_audio_file",
+    tags=["audio"],
+    summary="Download a stored audio file",
+    response_class=FileResponse,
+    responses={
+        200: {"description": "The censored file (default) or the original upload."},
+        404: {
+            "description": "No audio with this ID among your uploads, or its file is missing."
+        },
+        409: {
+            "description": "The censored file isn't ready: the job is still running, or failed."
+        },
+    },
+)
+async def read_audio_file(
+    audio_id: UUID,
+    user: CurrentUserDep,
+    service: AudioServiceDep,
+    request: Request,
+    variant: Annotated[
+        AudioVariant, Query(description="`censored` (default) or `original`.")
+    ] = AudioVariant.CENSORED,
+):
+    try:
+        stored = await service.get_audio_file(audio_id, user.id, variant)
+    except AudioNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except AudioNotReadyError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+    return await download_response(
+        stored.download, stored.media_type, stored.download_filename, request.method
+    )
+
+
 @router.get(
     "/audio/{audio_id}/transcript",
     tags=["audio"],
@@ -297,8 +394,6 @@ async def read_transcript(
     )
 
 
-# HEAD is a separate, unlisted route: one route with both methods gives
-# them the same OpenAPI operation id.
 @router.head("/audio/{audio_id}/subtitles", include_in_schema=False)
 @router.get(
     "/audio/{audio_id}/subtitles",
@@ -348,88 +443,4 @@ async def read_subtitles(
         text.encode("utf-8"),
         media_type=f"{options.format.media_type}; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
-
-
-@router.patch(
-    "/audio/{audio_id}",
-    tags=["audio"],
-    summary="Change a job's censor settings and re-run it",
-    status_code=status.HTTP_202_ACCEPTED,
-    response_model=AudioRead,
-    # A re-run uses the worker like an upload, so it shares /censor's budget.
-    dependencies=[Depends(limit_censor)],
-    responses={
-        200: {"description": "Nothing changed: the settings were already these."},
-        202: {
-            "description": "Queued (`status`: pending). New custom words re-run "
-            "detection and rendering; any other change re-runs rendering only. The "
-            "audio isn't transcribed again. Poll GET /audio/{id} as after an upload."
-        },
-        404: {"description": "No audio with this ID among your uploads."},
-        409: {
-            "description": "The job is still pending or processing, or it has no "
-            "stored transcript to re-run from (it failed before transcription, or "
-            "ran before transcripts were kept: upload it again)."
-        },
-        422: {"description": INVALID_SETTINGS},
-        429: {"description": TOO_MANY},
-        503: {"description": "The job queue is unavailable; nothing was changed."},
-    },
-)
-async def update_audio_settings(
-    audio_id: UUID,
-    body: AudioSettingsUpdate,
-    user: CurrentUserDep,
-    service: AudioServiceDep,
-    request: Request,
-    response: Response,
-) -> AudioRead:
-    """Send only the settings to change; the rest keep their current value."""
-    with _http_errors():
-        # exclude_none: null means "keep" (an empty custom_words list still
-        # goes through, and removes the words).
-        record = await service.update_settings(
-            audio_id, user.id, **body.model_dump(exclude_none=True)
-        )
-    if record.status != AudioStatus.PENDING:
-        response.status_code = status.HTTP_200_OK  # nothing changed, nothing queued
-    return AudioRead.from_record(record, request)
-
-
-@router.head("/audio/{audio_id}/file", include_in_schema=False)
-@router.get(
-    "/audio/{audio_id}/file",
-    name="read_audio_file",
-    tags=["audio"],
-    summary="Download a stored audio file",
-    response_class=FileResponse,
-    responses={
-        200: {"description": "The censored file (default) or the original upload."},
-        404: {
-            "description": "No audio with this ID among your uploads, or its file is missing."
-        },
-        409: {
-            "description": "The censored file isn't ready: the job is still running, or failed."
-        },
-    },
-)
-async def read_audio_file(
-    audio_id: UUID,
-    user: CurrentUserDep,
-    service: AudioServiceDep,
-    request: Request,
-    variant: Annotated[
-        AudioVariant, Query(description="`censored` (default) or `original`.")
-    ] = AudioVariant.CENSORED,
-):
-    try:
-        stored = await service.get_audio_file(audio_id, user.id, variant)
-    except AudioNotFoundError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except AudioNotReadyError as exc:
-        raise HTTPException(409, str(exc)) from exc
-
-    return await download_response(
-        stored.download, stored.media_type, stored.download_filename, request.method
     )

@@ -17,10 +17,9 @@ from fastapi import (
     status,
 )
 
-from app.api.audio import UNAUTHORIZED
 from app.api.dependencies import CurrentUserDep, SoundEffectServiceDep
 from app.api.rate_limit import limit_censor
-from app.api.responses import download_response
+from app.api.responses import UNAUTHORIZED, download_response
 from app.api.schemas import SoundEffectRead
 from app.config import get_api_settings
 from app.service.sound_effect_service import (

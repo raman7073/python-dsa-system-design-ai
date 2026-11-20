@@ -16,6 +16,7 @@ from app.database.models import (
     SoundEffect,
 )
 from app.service.audio_service import MAX_PADDING_MS, AudioVariant
+from app.subtitles import SubtitleFormat
 
 PASSWORD_MIN_LENGTH = 8
 PASSWORD_MAX_LENGTH = 128
@@ -112,6 +113,40 @@ class TranscriptRead(BaseModel):
     audio_id: UUID
     stage: JobStage | None
     words: list[TranscriptWord]
+
+
+MAX_VISIBLE_CHARS = 10
+
+
+class SubtitleOptions(BaseModel):
+    """Query parameters of GET /audio/{id}/subtitles."""
+
+    format: SubtitleFormat = Field(
+        default=SubtitleFormat.SRT, description="`srt` (default) or `vtt` (WebVTT)."
+    )
+    symbol: str = Field(
+        default="*",
+        min_length=1,
+        max_length=1,
+        description="The character that masks profane words (one character, not a "
+        "letter, digit, space or `<`, `>`, `&`).",
+    )
+    visible_chars: int = Field(
+        default=1,
+        ge=0,
+        le=MAX_VISIBLE_CHARS,
+        description="How many leading characters of a profane word stay visible: "
+        "1 gives `f***`, 0 masks it all. At least one character is always masked.",
+    )
+
+    @field_validator("symbol")
+    @classmethod
+    def check_symbol(cls, symbol: str) -> str:
+        # A letter or digit wouldn't read as masking; <, > and & are markup
+        # in subtitle players.
+        if symbol.isalnum() or symbol.isspace() or symbol in "<>&":
+            raise ValueError("must be a symbol, not a letter, digit, space or <, >, &")
+        return symbol
 
 
 class AudioSettingsUpdate(BaseModel):

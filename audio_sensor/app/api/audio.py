@@ -15,7 +15,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 
 from app.api.dependencies import AudioServiceDep, CurrentUserDep
 from app.api.pagination import decode_cursor, encode_cursor
@@ -24,6 +24,7 @@ from app.api.responses import download_response
 from app.api.schemas import (
     AudioRead,
     AudioSettingsUpdate,
+    SubtitleOptions,
     TranscriptRead,
     TranscriptWord,
 )
@@ -36,6 +37,7 @@ from app.service.audio_service import (
     AudioNotReadyError,
     AudioTooLongError,
     AudioVariant,
+    DetectionNotFinishedError,
     InvalidSettingsError,
     JobBusyError,
     QueueUnavailableError,
@@ -45,6 +47,7 @@ from app.service.audio_service import (
     TranscriptNotAvailableError,
 )
 from app.storage import UploadTooLargeError
+from app.subtitles import subtitles
 
 # Every route here requires a bearer token (`user: CurrentUserDep`), and users
 # only ever see their own audio.
@@ -294,6 +297,60 @@ async def read_transcript(
     )
 
 
+# HEAD is a separate, unlisted route: one route with both methods gives
+# them the same OpenAPI operation id.
+@router.head("/audio/{audio_id}/subtitles", include_in_schema=False)
+@router.get(
+    "/audio/{audio_id}/subtitles",
+    tags=["audio"],
+    summary="Download subtitles, with the profane words masked",
+    response_class=PlainTextResponse,
+    responses={
+        200: {
+            "description": "An SRT or WebVTT file (UTF-8). Each profane word is "
+            "masked, e.g. `f***` with `symbol` `*` and `visible_chars` 1.",
+            "content": {"application/x-subrip": {}, "text/vtt": {}},
+        },
+        404: {
+            "description": "No audio with this ID among your uploads, or it has no "
+            "transcript (it failed before transcription, or ran before transcripts "
+            "were kept)."
+        },
+        409: {
+            "description": "Profanity detection hasn't finished: the job is still "
+            "running (try again shortly), or it failed (re-run it with PATCH)."
+        },
+        422: {"description": "Bad `format`, `symbol` or `visible_chars`."},
+    },
+)
+async def read_subtitles(
+    audio_id: UUID,
+    user: CurrentUserDep,
+    service: AudioServiceDep,
+    options: Annotated[SubtitleOptions, Query()],
+) -> Response:
+    """Subtitles built from the stored transcript: words are grouped into
+    cues of at most two lines, and the flagged words are masked. Available
+    once detection has run (`stage` detected or rendered), before the
+    censored audio is ready."""
+    try:
+        words = await service.get_detected_words(audio_id, user.id)
+    except AudioNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except TranscriptNotAvailableError as exc:
+        raise HTTPException(409 if exc.pending else 404, str(exc)) from exc
+    except DetectionNotFinishedError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+    text = subtitles(words, options.format, options.symbol, options.visible_chars)
+    filename = f"{audio_id}.{options.format.value}"
+    return Response(
+        text.encode("utf-8"),
+        media_type=f"{options.format.media_type}; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.patch(
     "/audio/{audio_id}",
     tags=["audio"],
@@ -340,9 +397,9 @@ async def update_audio_settings(
     return AudioRead.from_record(record, request)
 
 
-@router.api_route(
+@router.head("/audio/{audio_id}/file", include_in_schema=False)
+@router.get(
     "/audio/{audio_id}/file",
-    methods=["GET", "HEAD"],
     name="read_audio_file",
     tags=["audio"],
     summary="Download a stored audio file",

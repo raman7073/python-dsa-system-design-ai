@@ -119,6 +119,20 @@ what was censored. 409 while it isn't transcribed yet; 404 for jobs without
 one. A word the aligner couldn't place (no timestamps: numbers, symbols) is
 still censored if flagged, over the span between the words around it.
 
+`GET /audio/{id}/subtitles` downloads the transcript as subtitles, with the
+profane words masked. Query options:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `format` | `srt` | `srt` or `vtt` (WebVTT) |
+| `symbol` | `*` | One masking character (not a letter, digit, space or `<>&`) |
+| `visible_chars` | `1` | Leading characters left visible (0-10): `f***`; at least one is always masked |
+
+Punctuation around a word is kept (`shit,` -> `s***,`). Cues are at most two
+lines of 42 characters and 6 seconds, split at sentence ends and pauses.
+Available once detection has run, before the audio is rendered; 409 until
+then (and while a re-run with new custom words re-detects).
+
 ## Health and browsers
 
 - `GET /health` (no login): 200 `{"status": "ok", ...}` when Postgres and

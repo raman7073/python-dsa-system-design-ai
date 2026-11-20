@@ -101,6 +101,20 @@ class TranscriptNotAvailableError(LookupError):
         )
 
 
+class DetectionNotFinishedError(LookupError):
+    """The transcript exists but profanity detection hasn't finished on it:
+    still running (`pending` is True), or the job failed in between."""
+
+    def __init__(self, record: AudioFile):
+        self.pending = record.status in (AudioStatus.PENDING, AudioStatus.PROCESSING)
+        super().__init__(
+            f"Profanity detection for audio {record.id} hasn't finished yet; try again shortly"
+            if self.pending
+            else f"Profanity detection for audio {record.id} didn't finish (the job "
+            f"failed); re-run it with PATCH /audio/{record.id}"
+        )
+
+
 class QueueUnavailableError(RuntimeError):
     """The censor job could not be queued (Redis is unreachable)."""
 
@@ -507,6 +521,17 @@ class AudioService:
         if transcript is None:
             raise TranscriptNotAvailableError(record)
         return transcript
+
+    async def get_detected_words(self, audio_id: UUID, owner_id: UUID) -> list[dict]:
+        """The transcript's words once detection has run, so each one's
+        "flagged" is current (for subtitles). Raises AudioNotFoundError,
+        TranscriptNotAvailableError, or DetectionNotFinishedError -- also
+        while a re-run with new custom words hasn't re-detected yet."""
+        transcript = await self.get_transcript(audio_id, owner_id)
+        record = await self.get_audio(audio_id, owner_id)
+        if record.stage not in (JobStage.DETECTED, JobStage.RENDERED):
+            raise DetectionNotFinishedError(record)
+        return transcript.words
 
     async def list_audios(
         self,

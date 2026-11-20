@@ -111,9 +111,10 @@ async def list_sound_effects(
     return [SoundEffectRead.from_effect(e, request) for e in effects]
 
 
-@router.api_route(
+# HEAD separately and unlisted (a shared route duplicates the operation id).
+@router.head("/{effect_id}/file", include_in_schema=False)
+@router.get(
     "/{effect_id}/file",
-    methods=["GET", "HEAD"],
     name="read_sound_effect_file",
     summary="Download a sound effect (to preview it)",
     responses=NOT_FOUND,

@@ -61,14 +61,14 @@ class SoundEffect(SQLModel, table=True):
 
     __tablename__ = "sound_effects"  # pyright: ignore[reportAssignmentType]
     __table_args__ = (
-        # Names are unique per owner, so different users can each have an
-        # "airhorn". NULLS NOT DISTINCT (Postgres 15+) makes built-in effects
-        # unique among themselves too, instead of treating every NULL owner
-        # as different.
+        # Names are unique per owner, ignoring case ("Airhorn" and "airhorn"
+        # are one name), so different users can each have an "airhorn".
+        # NULLS NOT DISTINCT (Postgres 15+) makes built-in effects unique among
+        # themselves too, instead of treating every NULL owner as different.
         Index(
-            "uq_sound_effects_user_id_name",
+            "uq_sound_effects_user_id_lower_name",
             "user_id",
-            "name",
+            text("lower(name)"),
             unique=True,
             postgresql_nulls_not_distinct=True,
         ),

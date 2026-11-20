@@ -17,7 +17,7 @@ import mimetypes
 import re
 import shutil
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from functools import cache
@@ -38,9 +38,9 @@ UPLOADS = "uploads"
 CENSORED = "censored"
 EFFECTS = "effects"
 
-# Formats accepted as sound effects (by extension: the API has no ffmpeg to
-# check the content; a file that isn't really audio fails the job using it).
-SOUND_EFFECT_SUFFIXES = (".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus", ".webm")
+# Formats accepted as sound effects: those whose headers the API can read
+# (app.audio_probe) to check the file is real audio and short enough.
+SOUND_EFFECT_SUFFIXES = (".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus")
 
 # Output keeps the upload's format when pydub/ffmpeg can write it directly;
 # anything else (e.g. .m4a, .webm) comes back as WAV.
@@ -203,14 +203,14 @@ class LocalStorage:
             self.path(key).unlink(missing_ok=True)
 
     @contextmanager
-    def local_copy(self, key: str) -> Iterator[Path]:
+    def local_copy(self, key: str) -> Generator[Path]:
         path = self.path(key)
         if not path.is_file():
             raise FileNotFoundError(key)
         yield path
 
     @contextmanager
-    def local_output(self, key: str) -> Iterator[Path]:
+    def local_output(self, key: str) -> Generator[Path]:
         path = self.path(key)
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -287,7 +287,7 @@ class S3Storage:
             )
 
     @contextmanager
-    def local_copy(self, key: str) -> Iterator[Path]:
+    def local_copy(self, key: str) -> Generator[Path]:
         tmp_dir = Path(tempfile.mkdtemp(prefix="audio-in-"))
         try:
             path = tmp_dir / PurePosixPath(key).name
@@ -302,7 +302,7 @@ class S3Storage:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
     @contextmanager
-    def local_output(self, key: str) -> Iterator[Path]:
+    def local_output(self, key: str) -> Generator[Path]:
         tmp_dir = Path(tempfile.mkdtemp(prefix="audio-out-"))
         try:
             # Same file name as the key: ffmpeg picks the format from it.

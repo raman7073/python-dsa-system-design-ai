@@ -1,4 +1,4 @@
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Annotated, Any
 from uuid import UUID
@@ -21,14 +21,20 @@ from app.api.dependencies import AudioServiceDep, CurrentUserDep
 from app.api.pagination import decode_cursor, encode_cursor
 from app.api.rate_limit import limit_censor
 from app.api.responses import download_response
-from app.api.schemas import AudioRead, AudioSettingsUpdate
+from app.api.schemas import (
+    AudioRead,
+    AudioSettingsUpdate,
+    TranscriptRead,
+    TranscriptWord,
+)
 from app.censor_words import MAX_CUSTOM_WORDS, InvalidCustomWordsError
-from app.config import get_api_settings
-from app.database.models import AudioStatus, CensorMode
+from app.config import get_api_settings, settings
+from app.database.models import AudioStatus, CensorMode, JobStage
 from app.service.audio_service import (
     MAX_PADDING_MS,
     AudioNotFoundError,
     AudioNotReadyError,
+    AudioTooLongError,
     AudioVariant,
     InvalidSettingsError,
     JobBusyError,
@@ -36,6 +42,7 @@ from app.service.audio_service import (
     RerunNotPossibleError,
     SoundEffectNotFoundError,
     TooManyActiveJobsError,
+    TranscriptNotAvailableError,
 )
 from app.storage import UploadTooLargeError
 
@@ -59,7 +66,7 @@ TOO_MANY = (
 
 
 @contextmanager
-def _http_errors() -> Iterator[None]:
+def _http_errors() -> Generator[None]:
     """Turn AudioService errors into HTTP responses (shared by the routes)."""
     try:
         yield
@@ -71,6 +78,7 @@ def _http_errors() -> Iterator[None]:
         InvalidCustomWordsError,
         InvalidSettingsError,
         SoundEffectNotFoundError,
+        AudioTooLongError,
     ) as exc:
         raise HTTPException(422, str(exc)) from exc
     except AudioNotFoundError as exc:
@@ -108,7 +116,11 @@ def _http_errors() -> Iterator[None]:
         413: {
             "description": f"The upload exceeds {get_api_settings().MAX_UPLOAD_MB} MB."
         },
-        422: {"description": INVALID_SETTINGS + " Nothing was stored."},
+        422: {
+            "description": INVALID_SETTINGS
+            + f" Or the audio is longer than {settings.MAX_AUDIO_MINUTES} minutes."
+            + " Nothing was stored."
+        },
         429: {"description": TOO_MANY},
         503: {"description": "The job queue is unavailable; nothing was stored."},
     },
@@ -249,6 +261,39 @@ async def read_audio(
     return AudioRead.from_record(record, request)
 
 
+@router.get(
+    "/audio/{audio_id}/transcript",
+    tags=["audio"],
+    summary="Get the transcript, with the censored words",
+    response_model=TranscriptRead,
+    responses={
+        404: {
+            "description": "No audio with this ID among your uploads, or it has no "
+            "transcript (it failed before transcription, or ran before transcripts "
+            "were kept)."
+        },
+        409: {"description": "Not transcribed yet; try again shortly."},
+    },
+)
+async def read_transcript(
+    audio_id: UUID, user: CurrentUserDep, service: AudioServiceDep
+) -> TranscriptRead:
+    """Every transcribed word with its timestamps, and `flagged` once
+    detection has run (`stage` detected or rendered)."""
+    try:
+        transcript = await service.get_transcript(audio_id, user.id)
+    except AudioNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except TranscriptNotAvailableError as exc:
+        raise HTTPException(409 if exc.pending else 404, str(exc)) from exc
+    record = await service.get_audio(audio_id, user.id)
+    return TranscriptRead(
+        audio_id=audio_id,
+        stage=JobStage(record.stage) if record.stage else None,
+        words=[TranscriptWord(**w) for w in transcript.words],
+    )
+
+
 @router.patch(
     "/audio/{audio_id}",
     tags=["audio"],
@@ -295,8 +340,9 @@ async def update_audio_settings(
     return AudioRead.from_record(record, request)
 
 
-@router.get(
+@router.api_route(
     "/audio/{audio_id}/file",
+    methods=["GET", "HEAD"],
     name="read_audio_file",
     tags=["audio"],
     summary="Download a stored audio file",
@@ -315,6 +361,7 @@ async def read_audio_file(
     audio_id: UUID,
     user: CurrentUserDep,
     service: AudioServiceDep,
+    request: Request,
     variant: Annotated[
         AudioVariant, Query(description="`censored` (default) or `original`.")
     ] = AudioVariant.CENSORED,
@@ -326,4 +373,6 @@ async def read_audio_file(
     except AudioNotReadyError as exc:
         raise HTTPException(409, str(exc)) from exc
 
-    return download_response(stored.download, stored.media_type, stored.download_filename)
+    return await download_response(
+        stored.download, stored.media_type, stored.download_filename, request.method
+    )

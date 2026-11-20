@@ -9,6 +9,12 @@ from app.database.models import User
 from app.security import burn_dummy_verify, hash_password, verify_and_update_password
 
 
+def normalize_email(email: str) -> str:
+    """How emails are stored and looked up: trimmed and lower-cased, so login
+    accepts exactly what was typed at signup."""
+    return email.strip().lower()
+
+
 class EmailAlreadyRegisteredError(ValueError):
     """A user with this email already exists."""
 
@@ -22,7 +28,7 @@ class UserService:
     async def get_by_email(self, email: str) -> User | None:
         # scalar(): first column of the first row, or None. Emails are unique
         # (unique index on users.email), so there is at most one row.
-        return await self.session.scalar(select(User).where(User.email == email.lower()))
+        return await self.session.scalar(select(User).where(User.email == normalize_email(email)))
 
     async def get_by_id(self, user_id: UUID) -> User | None:
         return await self.session.get(User, user_id)
@@ -59,7 +65,7 @@ class UserService:
 
         Raises EmailAlreadyRegisteredError if the email is taken.
         """
-        email = email.lower()
+        email = normalize_email(email)
         if await self.get_by_email(email) is not None:
             raise EmailAlreadyRegisteredError(email)
 

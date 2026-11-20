@@ -1,12 +1,14 @@
 import logging
 import math
 import shutil
+import subprocess
 import warnings
 from collections import OrderedDict
 from collections.abc import Sequence
 from pathlib import Path
 from typing import NotRequired, TypedDict, cast
 
+import numpy as np
 import torch
 import whisperx
 from better_profanity import Profanity
@@ -40,6 +42,57 @@ class Word(TypedDict):
 
 class AudioDecodeError(ValueError):
     """The input file could not be decoded as audio."""
+
+
+class AudioTooLongError(ValueError):
+    """The audio is longer than allowed (max_seconds)."""
+
+    def __init__(self, max_seconds: float):
+        self.max_seconds = max_seconds
+        super().__init__(f"The audio is longer than {max_seconds / 60:.0f} minutes")
+
+
+SAMPLE_RATE = 16000  # what Whisper expects
+
+# What ffprobe calls each output format, to tell whether a file's content
+# matches its extension.
+_FORMAT_NAMES = {".mp3": {"mp3"}, ".wav": {"wav"}, ".flac": {"flac"}, ".ogg": {"ogg"}}
+
+
+def _load_audio(path: str, max_seconds: float | None) -> np.ndarray:
+    """Decode any format ffmpeg understands to 16 kHz mono float32, as
+    whisperx.load_audio does, but reading at most `max_seconds` (+1): a small
+    file can hold hours of audio, and decoding all of it would take gigabytes
+    of memory before its length could even be checked."""
+    limit = ["-t", str(max_seconds + 1)] if max_seconds else []
+    cmd = [
+        "ffmpeg", "-nostdin", "-threads", "0", "-i", path, *limit,
+        "-f", "s16le", "-ac", "1", "-acodec", "pcm_s16le", "-ar", str(SAMPLE_RATE), "-",
+    ]  # fmt: skip
+    try:
+        out = subprocess.run(cmd, capture_output=True, check=True).stdout
+    except subprocess.CalledProcessError as exc:
+        raise AudioDecodeError(f"Could not decode {path!r} as audio") from exc
+    return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
+
+
+def _format_matches(path: str, suffix: str) -> bool:
+    """Whether the file really is the format its extension says (e.g. WAV
+    data named .mp3 isn't). Unknown suffixes, or ffprobe failing, count as a
+    match, so the file is kept as it is."""
+    expected = _FORMAT_NAMES.get(suffix.lower())
+    if expected is None:
+        return True
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=format_name",
+             "-of", "default=nw=1:nk=1", path],
+            capture_output=True, text=True, check=True, timeout=30,
+        ).stdout  # fmt: skip
+    except (OSError, subprocess.SubprocessError):
+        logger.warning("Couldn't check the format of %r; keeping it as it is", path)
+        return True
+    return bool(expected & set(out.strip().split(",")))
 
 
 class SoundEffectError(ValueError):
@@ -83,6 +136,7 @@ class AudioCensor:
         vad_onset: float = 0.3,
         vad_offset: float = 0.2,
         threads: int | None = None,
+        max_effect_seconds: float = 10,
     ):
         self.censor_words = censor_words or []
         self.model_name = model_name
@@ -97,6 +151,9 @@ class AudioCensor:
         # use one per physical core (what torch picks), since a worker runs
         # one job at a time.
         self.threads = threads or torch.get_num_threads()
+        # Sound effects are never decoded beyond this (a small file can hold
+        # hours); they are repeated or cut to fit each word anyway.
+        self.max_effect_seconds = max_effect_seconds
 
         # better_profanity's built-in English word list plus our own censor
         # words. A per-instance Profanity (instead of the module-level
@@ -150,6 +207,7 @@ class AudioCensor:
         copy_unchanged: bool = True,
         custom_words: Sequence[str] | None = None,
         sound_effect_path: str | None = None,
+        max_seconds: float | None = None,
     ) -> tuple[str | None, list[Word]]:
         """Full pipeline: transcribe, flag profanity, then replace it.
 
@@ -166,6 +224,7 @@ class AudioCensor:
         place of the path, so the caller can reuse the original file.
 
         Raises AudioDecodeError if the file isn't decodable audio,
+        AudioTooLongError if it is longer than `max_seconds`,
         SoundEffectError if the sound effect isn't, InvalidCustomWordsError
         for a bad custom word list, and ValueError for both `beep` and a
         sound effect.
@@ -178,7 +237,7 @@ class AudioCensor:
             raise ValueError("Use either beep or a sound effect, not both")
         profanity = self._profanity_for(custom_words)
 
-        audio = self._decode(audio_path)
+        audio = self._decode(audio_path, max_seconds)
         segments = self._transcribe(audio)
         if not any(profanity.contains_profanity(s["text"]) for s in segments):
             # The whole-segment check is at least as strict as the per-word
@@ -221,7 +280,8 @@ class AudioCensor:
         """
         if not any(w.get("flagged") for w in words):
             out = self._output_path(audio_path, output_path)
-            if not copy_unchanged and out.suffix.lower() == Path(audio_path).suffix.lower():
+            same = out.suffix.lower() == Path(audio_path).suffix.lower()
+            if not copy_unchanged and same and _format_matches(audio_path, out.suffix):
                 return None
             return self._write_unchanged(audio_path, str(out))
         return self.mute_audio(
@@ -246,22 +306,24 @@ class AudioCensor:
             self._custom_profanity.popitem(last=False)  # least recently used
         return profanity
 
-    def transcribe_audio(self, audio_path: str) -> list[Word]:
+    def transcribe_audio(self, audio_path: str, max_seconds: float | None = None) -> list[Word]:
         """Transcribe English audio and force-align it for word-level timestamps.
 
         Returns one Word per transcribed word, in order (without "flagged").
-        Raises AudioDecodeError if the file isn't decodable audio.
+        Raises AudioDecodeError if the file isn't decodable audio, and
+        AudioTooLongError if it is longer than `max_seconds`.
         """
-        audio = self._decode(audio_path)
+        audio = self._decode(audio_path, max_seconds)
         return self._align(self._transcribe(audio), audio)
 
     @staticmethod
-    def _decode(audio_path: str):
-        """Any format ffmpeg understands, as 16 kHz mono float32 (for Whisper)."""
-        try:
-            return whisperx.load_audio(audio_path)
-        except RuntimeError as exc:
-            raise AudioDecodeError(f"Could not decode {audio_path!r} as audio") from exc
+    def _decode(audio_path: str, max_seconds: float | None = None) -> np.ndarray:
+        """Any format ffmpeg understands, as 16 kHz mono float32 (for Whisper),
+        never decoding more than max_seconds (+1, to tell it was longer)."""
+        audio = _load_audio(audio_path, max_seconds)
+        if max_seconds and len(audio) > max_seconds * SAMPLE_RATE:
+            raise AudioTooLongError(max_seconds)
+        return audio
 
     def _transcribe(self, audio) -> list[dict]:
         """Whisper segments: {"text", "start", "end"} (no word timestamps)."""
@@ -301,11 +363,13 @@ class AudioCensor:
         )
 
     def _write_unchanged(self, audio_path: str, output_path: str | None) -> str:
-        """The input as the output: copied byte for byte when the format is
-        the same (faster, and no re-encoding loss), else converted."""
+        """The input as the output: copied byte for byte when it really is the
+        output's format (faster, and no re-encoding loss), else converted --
+        including content whose extension lies (WAV data named .mp3), so the
+        output's bytes always match its extension."""
         src = Path(audio_path)
         out = self._output_path(audio_path, output_path)
-        if out.suffix.lower() == src.suffix.lower():
+        if out.suffix.lower() == src.suffix.lower() and _format_matches(audio_path, src.suffix):
             shutil.copyfile(src, out)
             return str(out)
         try:
@@ -381,19 +445,25 @@ class AudioCensor:
     ) -> list[tuple[int, int]]:
         """Padded (start_ms, end_ms) spans of flagged words, sorted and merged.
 
-        Flagged words without timestamps can't be located, so they are
-        skipped with a warning.
+        A flagged word the aligner couldn't place (no timestamps: numbers or
+        symbols, e.g. a custom word "1984") is never skipped: its span is
+        estimated from the words around it (see _estimated_bounds).
         """
         spans = []
-        for word in words:
+        for i, word in enumerate(words):
             if not word.get("flagged"):
                 continue
-            if "start" not in word or "end" not in word:
-                logger.warning("Can't censor %r: no timestamps", word["word"])
-                continue
+            if "start" in word and "end" in word:
+                start_ms, end_ms = int(word["start"] * 1000), int(word["end"] * 1000)
+            else:
+                start_ms, end_ms = AudioCensor._estimated_bounds(words, i, audio_len_ms)
+                logger.warning(
+                    "%r has no timestamps; censoring %d-%d ms around it",
+                    word["word"], start_ms, end_ms,
+                )  # fmt: skip
             spans.append((
-                max(0, int(word["start"] * 1000) - padding_ms),
-                min(audio_len_ms, int(word["end"] * 1000) + padding_ms),
+                max(0, start_ms - padding_ms),
+                min(audio_len_ms, end_ms + padding_ms),
             ))
 
         merged: list[tuple[int, int]] = []
@@ -404,12 +474,36 @@ class AudioCensor:
                 merged.append((start_ms, end_ms))
         return merged
 
+    # Shorter than this, the gap between a word's neighbours can't hold it:
+    # the aligner gave the neighbours its time.
+    MIN_ESTIMATED_MS = 250
+
     @staticmethod
-    def _load_effect(path: str, audio: AudioSegment) -> AudioSegment:
-        """The sound effect, converted once to `audio`'s format (frame rate,
-        channels, sample width) so every span joins without resampling."""
+    def _estimated_bounds(words: list[Word], i: int, audio_len_ms: int) -> tuple[int, int]:
+        """Where a word without timestamps must be: between the nearest timed
+        words before and after it (the start or end of the audio if there are
+        none). If that gap is too short, the neighbours are included too.
+        Censoring a little too much beats letting a flagged word through."""
+
+        def timed(j: int) -> bool:
+            return "start" in words[j] and "end" in words[j]
+
+        before = next((words[j] for j in range(i - 1, -1, -1) if timed(j)), None)
+        after = next((words[j] for j in range(i + 1, len(words)) if timed(j)), None)
+        # (timed() guarantees the keys; .get() only satisfies the type checker.)
+        start = int(before.get("end", 0) * 1000) if before else 0
+        end = int(after.get("start", 0) * 1000) if after else audio_len_ms
+        if end - start < AudioCensor.MIN_ESTIMATED_MS:
+            start = int(before.get("start", 0) * 1000) if before else 0
+            end = int(after.get("end", 0) * 1000) if after else audio_len_ms
+        return start, end
+
+    def _load_effect(self, path: str, audio: AudioSegment) -> AudioSegment:
+        """The sound effect (at most max_effect_seconds of it), converted once
+        to `audio`'s format (frame rate, channels, sample width) so every span
+        joins without resampling."""
         try:
-            effect = AudioSegment.from_file(path)
+            effect = AudioSegment.from_file(path, duration=self.max_effect_seconds)
         except CouldntDecodeError as exc:
             raise SoundEffectError(f"Could not decode sound effect {path!r}") from exc
         if len(effect) == 0:

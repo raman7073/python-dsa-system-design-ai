@@ -65,6 +65,10 @@ file: the job's censored file is the upload itself.
 
 ### Limits
 
+- Audio longer than `MAX_AUDIO_MINUTES` (60) is refused: with **422** at
+  upload when the file's headers show it, otherwise the job fails with a
+  clear error. The worker never decodes more than the limit, so a small file
+  holding hours of audio can't tie it up or exhaust its memory.
 - Request bodies over `MAX_UPLOAD_MB` (plus a little for form fields) are
   refused with **413** before they are read, so oversized uploads never reach
   the disk, even without a token.
@@ -100,11 +104,29 @@ flac, ogg, m4a, aac, opus or webm; at most `MAX_SOUND_EFFECT_MB`, 2 MB). It is
 stored like uploads (`effects/<id>.<ext>`, local or S3); names are unique per
 user, at most `MAX_SOUND_EFFECTS_PER_USER` (20) each. `GET /sound-effects`
 lists yours plus built-in ones (rows with no owner); `GET
-/sound-effects/{id}/file` downloads one; `DELETE /sound-effects/{id}` removes
+/sound-effects/{id}/file` downloads one (`HEAD`: just its size); `DELETE /sound-effects/{id}` removes
 yours (409 while a job still being censored uses it). When rendering, the
-effect replaces each censored word, repeated or cut to fit. The API checks
-only the file type and size (it has no ffmpeg); a file that isn't really
-audio fails the job that uses it, with a clear error.
+effect replaces each censored word, repeated or cut to fit. Uploads are
+checked to be real audio of at most `MAX_SOUND_EFFECT_SECONDS` (10), by
+reading their headers (WebM can't be checked that way, so it isn't
+accepted); names are unique ignoring case.
+
+## Transcripts
+
+`GET /audio/{id}/transcript` returns every transcribed word with its
+timestamps and `flagged` (null until detection has run), so users can see
+what was censored. 409 while it isn't transcribed yet; 404 for jobs without
+one. A word the aligner couldn't place (no timestamps: numbers, symbols) is
+still censored if flagged, over the span between the words around it.
+
+## Health and browsers
+
+- `GET /health` (no login): 200 `{"status": "ok", ...}` when Postgres and
+  Redis both answer, 503 naming the one that doesn't. The `api` container
+  uses it as its health check.
+- CORS is off by default. To let a browser front-end call the API, list its
+  origins in `CORS_ORIGINS` (JSON), e.g. `["https://app.example.com"]`.
+- Downloads answer `HEAD` (size and type only) and `Range` requests.
 
 ## Listing audio
 

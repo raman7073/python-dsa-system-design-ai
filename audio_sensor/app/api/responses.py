@@ -10,14 +10,25 @@ from starlette.types import Receive, Scope, Send
 from app.storage import Download
 
 
-def download_response(download: Download, media_type: str, filename: str) -> Response:
+async def download_response(
+    download: Download, media_type: str, filename: str, method: str = "GET"
+) -> Response:
     """A local file as-is, or an object-storage stream passed through (so
-    download links stay behind login)."""
+    download links stay behind login).
+
+    For HEAD (players and caches use it to learn the size first), only the
+    headers: FileResponse handles that itself; a stream is closed unread.
+    """
     if download.path is not None:
         return FileResponse(download.path, media_type=media_type, filename=filename)
     headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
     if download.size is not None:
         headers["Content-Length"] = str(download.size)
+    if method.upper() == "HEAD":
+        if download.close is not None:
+            await run_in_threadpool(download.close)
+        # The given Content-Length is kept (an empty body would set it to 0).
+        return Response(media_type=media_type, headers=headers)
     return ClosingStreamingResponse(download, media_type=media_type, headers=headers)
 
 

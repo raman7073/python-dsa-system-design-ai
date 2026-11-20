@@ -94,6 +94,26 @@ class SoundEffectRead(BaseModel):
         )
 
 
+class TranscriptWord(BaseModel):
+    word: str
+    # Seconds. Null when the aligner couldn't place the word (numbers or
+    # symbols); a flagged one is then censored over an estimated span.
+    start: float | None = None
+    end: float | None = None
+    score: float | None = Field(default=None, description="Alignment confidence, 0-1.")
+    flagged: bool | None = Field(
+        default=None, description="Censored or not; null until detection has run."
+    )
+
+
+class TranscriptRead(BaseModel):
+    """What was heard, word by word, and which words were censored."""
+
+    audio_id: UUID
+    stage: JobStage | None
+    words: list[TranscriptWord]
+
+
 class AudioSettingsUpdate(BaseModel):
     """PATCH /audio/{id} body: the settings to change; anything left out (or
     null) keeps its current value."""

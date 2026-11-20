@@ -16,6 +16,7 @@ dependencies = [
     "celery[redis]>=5.7.0",
     "email-validator>=2.3.0",
     "fastapi[all]>=0.162.4",
+    "mutagen>=1.48.1",
     "pwdlib[argon2]>=0.4.2",
     "pydantic-settings>=2.16.2",
     "pyjwt>=2.15.1",

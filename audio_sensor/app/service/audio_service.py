@@ -12,8 +12,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, or_, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.audio_probe import header_duration
 from app.censor_words import normalize_custom_words
-from app.config import get_api_settings
+from app.config import get_api_settings, settings
 from app.database.models import (
     AudioFile,
     AudioStatus,
@@ -73,6 +74,31 @@ class AudioNotReadyError(RuntimeError):
         else:
             message = f"Audio {record.id} is still {self.status}; try again shortly"
         super().__init__(message)
+
+
+class AudioTooLongError(ValueError):
+    """The upload's headers declare more than MAX_AUDIO_MINUTES of audio."""
+
+    def __init__(self, minutes: float):
+        self.minutes = minutes
+        super().__init__(
+            f"The audio is {minutes:.0f} minutes long; at most "
+            f"{settings.MAX_AUDIO_MINUTES} minutes are accepted"
+        )
+
+
+class TranscriptNotAvailableError(LookupError):
+    """The job has no stored transcript: not transcribed yet (`pending` is
+    True), or never will be (failed before transcription, or ran before
+    transcripts were kept)."""
+
+    def __init__(self, record: AudioFile):
+        self.pending = record.status in (AudioStatus.PENDING, AudioStatus.PROCESSING)
+        super().__init__(
+            f"Audio {record.id} hasn't been transcribed yet; try again shortly"
+            if self.pending
+            else f"Audio {record.id} has no transcript"
+        )
 
 
 class QueueUnavailableError(RuntimeError):
@@ -192,6 +218,11 @@ class AudioService:
         _check_padding(padding_ms)
         effect_id = await self._resolve_effect(censor_mode, sound_effect_id, owner_id)
         in_suffix = input_suffix(filename)
+        # Refuse obviously long files now. Headers can be missing (unknown
+        # format) or lie, so the worker enforces the limit again on decode.
+        duration = await asyncio.to_thread(header_duration, data, in_suffix)
+        if duration is not None and duration > settings.MAX_AUDIO_MINUTES * 60:
+            raise AudioTooLongError(duration / 60)
         out_suffix = output_suffix(in_suffix)
 
         # Files are named by the record's ID, so names never collide and the
@@ -357,7 +388,14 @@ class AudioService:
         record.queued_at = utc_now()
         record.finished_at = None
         self.session.add(record)
-        await self.session.commit()
+        effect_id = record.sound_effect_id  # read now: rollback() expires the record
+        try:
+            await self.session.commit()
+        except IntegrityError as exc:
+            # The only reference that can vanish in between: the sound effect,
+            # deleted since _plan_rerun checked it. Nothing was saved.
+            await self.session.rollback()
+            raise SoundEffectNotFoundError(f"No sound effect with id {effect_id}") from exc
 
         try:
             await asyncio.to_thread(self.enqueue_censor, audio_id, after)
@@ -389,6 +427,12 @@ class AudioService:
         # new one is given; any other mode drops it.
         if sound_effect_id is None and mode == CensorMode.SOUND_EFFECT:
             sound_effect_id = record.sound_effect_id
+            if sound_effect_id is None and record.censor_mode == CensorMode.SOUND_EFFECT:
+                # It had one: deleting an effect clears it from its jobs.
+                raise InvalidSettingsError(
+                    "This job's sound effect was deleted: choose another one "
+                    "(sound_effect_id) or another censor_mode"
+                )
         effect_id = await self._resolve_effect(mode, sound_effect_id, owner_id)
 
         words_changed = new_words is not None and new_words != list(record.custom_words)
@@ -453,6 +497,16 @@ class AudioService:
             select(AudioTranscript.audio_id).where(AudioTranscript.audio_id == audio_id)
         )
         return found is not None
+
+    async def get_transcript(self, audio_id: UUID, owner_id: UUID) -> AudioTranscript:
+        """The job's word-level transcript (with each word's "flagged" once
+        detection has run). Raises AudioNotFoundError, or
+        TranscriptNotAvailableError if there is none (yet)."""
+        record = await self.get_audio(audio_id, owner_id)
+        transcript = await self.session.get(AudioTranscript, audio_id)
+        if transcript is None:
+            raise TranscriptNotAvailableError(record)
+        return transcript
 
     async def list_audios(
         self,

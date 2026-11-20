@@ -47,6 +47,8 @@ os.environ["DB_ECHO"] = "false"
 os.environ["STORAGE_BACKEND"] = "local"  # S3Storage has its own tests
 os.environ["STORAGE_DIR"] = str(STORAGE_DIR)
 os.environ["MAX_UPLOAD_MB"] = "1"
+# One allowed browser origin, so CORS is switched on (tests/test_qa_fixes.py).
+os.environ["CORS_ORIGINS"] = '["https://app.example.com"]'
 os.environ["JWT_SECRET_KEY"] = "test-only-secret-key-that-is-long-enough-for-hs256"
 # Only the Redis rate limiter test talks to Redis; keep its keys in a
 # separate database from the app's (db 0).

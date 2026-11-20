@@ -76,6 +76,15 @@ class SharedSettings(_EnvSettings):
     # the queue's redelivery timeout is derived from it.
     JOB_TIME_LIMIT_MINUTES: int = Field(default=90, gt=0)
 
+    # Longest audio accepted, in minutes. Checked from the file's headers at
+    # upload when they can be read, and enforced by the worker when it decodes
+    # (headers can lie): a small file can hold hours of audio. Keep
+    # JOB_TIME_LIMIT_MINUTES comfortably above it.
+    MAX_AUDIO_MINUTES: int = Field(default=60, gt=0)
+    # Longest sound effect, in seconds (checked at upload; the worker never
+    # decodes more than this).
+    MAX_SOUND_EFFECT_SECONDS: int = Field(default=10, gt=0)
+
     @property
     def storage_path(self) -> Path:
         if self.STORAGE_DIR.is_absolute():
@@ -115,6 +124,11 @@ class ApiSettings(_EnvSettings):
     LOGIN_RATE_LIMIT_PER_MINUTE: int = Field(default=10, ge=1)
     SIGNUP_RATE_LIMIT_PER_HOUR: int = Field(default=10, ge=1)
     CENSOR_RATE_LIMIT_PER_HOUR: int = Field(default=30, ge=1)
+
+    # Browser front-ends allowed to call the API (CORS), e.g.
+    # ["https://app.example.com"]. Empty: no CORS headers, so browsers on
+    # other sites can't call it. In .env, as JSON.
+    CORS_ORIGINS: list[str] = []
 
     @property
     def max_upload_bytes(self) -> int:

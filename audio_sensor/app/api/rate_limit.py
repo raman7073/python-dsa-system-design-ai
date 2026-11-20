@@ -49,6 +49,10 @@ class RedisRateLimiter:
             return None
         return max(int(ttl), 1) if count > limit else None
 
+    async def ping(self) -> None:
+        """Raises if Redis is unreachable (used by GET /health)."""
+        await self._redis.ping()
+
     async def close(self) -> None:
         await self._redis.aclose()
 

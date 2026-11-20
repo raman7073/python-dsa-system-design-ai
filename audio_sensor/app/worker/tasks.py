@@ -16,7 +16,7 @@ back, and duplicate or late deliveries of a step simply skip.
 """
 
 import asyncio
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager, nullcontext
 from datetime import timedelta
 from pathlib import PurePosixPath
@@ -34,7 +34,13 @@ from sqlalchemy.pool import NullPool
 from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.audio_censor import AudioCensor, AudioDecodeError, SoundEffectError, Word
+from app.audio_censor import (
+    AudioCensor,
+    AudioDecodeError,
+    AudioTooLongError,
+    SoundEffectError,
+    Word,
+)
 from app.config import get_worker_settings, settings
 from app.database.models import (
     AudioFile,
@@ -67,6 +73,7 @@ MISSING_UPLOAD_ERROR = "The uploaded file is missing. Try uploading it again."
 MISSING_TRANSCRIPT_ERROR = "The transcript is missing. Try uploading the file again."
 SOUND_EFFECT_MISSING_ERROR = "The chosen sound effect no longer exists."
 SOUND_EFFECT_ERROR = "The chosen sound effect could not be read as audio."
+TOO_LONG_ERROR = f"The audio is longer than {settings.MAX_AUDIO_MINUTES} minutes."
 
 
 class _CensorFailed(Exception):
@@ -103,6 +110,7 @@ def get_censor() -> AudioCensor:
             censor_words=worker_settings.CENSOR_WORDS,
             model_name=worker_settings.WHISPER_MODEL,
             threads=worker_settings.WHISPER_THREADS or None,
+            max_effect_seconds=settings.MAX_SOUND_EFFECT_SECONDS,
         )
     return _censor
 
@@ -138,7 +146,10 @@ def transcribe_audio_task(self: Task, audio_id: UUID) -> None:
 
     def transcribe() -> list[Word]:
         with get_storage().local_copy(record.file_path) as src, _censoring(audio_id):
-            return get_censor().transcribe_audio(str(src))
+            # Never decodes more than the limit, whatever the headers claim.
+            return get_censor().transcribe_audio(
+                str(src), max_seconds=settings.MAX_AUDIO_MINUTES * 60
+            )
 
     words = _run_step(audio_id, transcribe)
     if words is not None:
@@ -280,13 +291,15 @@ async def _sound_effect_key(effect_id: UUID | None) -> str | None:
 
 
 @contextmanager
-def _censoring(audio_id: UUID) -> Iterator[None]:
+def _censoring(audio_id: UUID) -> Generator[None]:
     """Turn the censoring work's own errors into job failures. Storage errors
     stay outside this block, so brief outages are retried instead."""
     try:
         yield
     except AudioDecodeError as exc:
         raise _CensorFailed(DECODE_ERROR) from exc
+    except AudioTooLongError as exc:
+        raise _CensorFailed(TOO_LONG_ERROR) from exc
     except SoundEffectError as exc:
         raise _CensorFailed(SOUND_EFFECT_ERROR) from exc
     except SoftTimeLimitExceeded as exc:

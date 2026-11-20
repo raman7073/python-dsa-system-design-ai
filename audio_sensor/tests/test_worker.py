@@ -46,8 +46,10 @@ class FakeCensor:
         self.errors: dict[str, BaseException] = {}  # step -> error to raise
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
-    def transcribe_audio(self, audio_path: str) -> list[Word]:
-        self.calls.append(("transcribe", {"audio": Path(audio_path).read_bytes()}))
+    def transcribe_audio(self, audio_path: str, max_seconds: float | None = None) -> list[Word]:
+        self.calls.append(
+            ("transcribe", {"audio": Path(audio_path).read_bytes(), "max_seconds": max_seconds})
+        )
         if "transcribe" in self.errors:
             raise self.errors["transcribe"]
         return [Word(**w) for w in self.transcript]  # type: ignore[typeddict-item]
@@ -612,3 +614,21 @@ def test_update_settings_then_worker_completes_with_new_words(
     assert (done.status, done.flagged_count) == (AudioStatus.COMPLETED, 2)
     assert censor.steps() == ["transcribe", "detect", "render", "detect", "render"]
     assert read_stored(done.censored_file_path) == b"censored[hello,darn]:song"
+
+
+def test_transcription_is_capped_and_too_long_audio_fails_clearly(
+    censor: FakeCensor, user: AppUser
+) -> None:
+    from app.audio_censor import AudioTooLongError
+
+    record = asyncio.run(make_audio(user.id))
+    run("transcribe", record.id)
+    assert censor.last("transcribe")["max_seconds"] == settings.MAX_AUDIO_MINUTES * 60
+
+    censor.errors["transcribe"] = AudioTooLongError(settings.MAX_AUDIO_MINUTES * 60)
+    long_one = asyncio.run(make_audio(user.id))
+    run_all(long_one.id)
+
+    failed = row(long_one.id)
+    assert (failed.status, failed.error) == (AudioStatus.FAILED, tasks.TOO_LONG_ERROR)
+    assert censor.steps().count("detect") == 0  # later steps skipped

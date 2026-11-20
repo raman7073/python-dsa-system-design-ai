@@ -111,21 +111,22 @@ async def list_sound_effects(
     return [SoundEffectRead.from_effect(e, request) for e in effects]
 
 
-@router.get(
+@router.api_route(
     "/{effect_id}/file",
+    methods=["GET", "HEAD"],
     name="read_sound_effect_file",
     summary="Download a sound effect (to preview it)",
     responses=NOT_FOUND,
 )
 async def read_sound_effect_file(
-    effect_id: UUID, user: CurrentUserDep, service: SoundEffectServiceDep
+    effect_id: UUID, user: CurrentUserDep, service: SoundEffectServiceDep, request: Request
 ) -> Response:
     try:
         stored = await service.get_file(effect_id, user.id)
     except SoundEffectNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
-    return download_response(
-        stored.download, stored.media_type, stored.download_filename
+    return await download_response(
+        stored.download, stored.media_type, stored.download_filename, request.method
     )
 
 

@@ -1,9 +1,11 @@
 """The /sound-effects endpoints, and using an uploaded effect for censoring."""
 
+import io
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from pydub.generators import Sine
 
 from app.config import get_api_settings
 from app.database.models import AudioStatus, CensorMode
@@ -17,7 +19,17 @@ from tests.helpers import (
 )
 
 
-def effect_file(content: bytes = b"honk", filename: str = "honk.wav") -> dict:
+def tone_wav(ms: int = 300) -> bytes:
+    """A real (short) WAV file: effects are checked to be readable audio."""
+    buf = io.BytesIO()
+    Sine(1000).to_audio_segment(duration=ms).export(buf, format="wav")
+    return buf.getvalue()
+
+
+TONE = tone_wav()
+
+
+def effect_file(content: bytes = TONE, filename: str = "honk.wav") -> dict:
     return {"file": (filename, content, "audio/wav")}
 
 
@@ -42,7 +54,7 @@ async def test_upload_list_preview_delete(client: httpx.AsyncClient, make_user: 
 
     preview = await client.get(effect["file_url"].removeprefix("http://test"), headers=user.headers)
     assert preview.status_code == 200
-    assert preview.content == b"honk"
+    assert preview.content == TONE
     assert preview.headers["content-type"] == "audio/wav"
 
     r = await client.delete(f"/sound-effects/{effect['id']}", headers=user.headers)
@@ -108,8 +120,12 @@ async def test_names_are_unique_per_user(client: httpx.AsyncClient, make_user: M
         ({"name": "   "}, 422),
         ({"name": "x" * 101}, 422),
         ({"content": b"x" * (2 * 1024 * 1024 + 1)}, 413),
+        ({"content": b"this is not audio at all"}, 422),
+        ({"content": tone_wav(11_000)}, 422),
+        ({"filename": "clip.webm"}, 422),
     ],
-    ids=["not-audio-extension", "no-extension", "blank-name", "long-name", "too-large"],
+    ids=["not-audio-extension", "no-extension", "blank-name", "long-name", "too-large",
+         "not-audio-content", "longer-than-10s", "webm-unreadable"],
 )
 async def test_bad_uploads_are_refused_and_nothing_kept(
     client: httpx.AsyncClient, make_user: MakeUser, kwargs: dict, code: int

@@ -23,6 +23,8 @@ x-shared-env: &shared-env
   # Inside Docker, Redis is reached by its service name.
   REDIS_URL: redis://redis:6379/0
   JOB_TIME_LIMIT_MINUTES: ${JOB_TIME_LIMIT_MINUTES:-}
+  MAX_AUDIO_MINUTES: ${MAX_AUDIO_MINUTES:-}
+  MAX_SOUND_EFFECT_SECONDS: ${MAX_SOUND_EFFECT_SECONDS:-}
   # Storage (app/storage.py): "local" (the shared ./storage folder) or "s3".
   # STORAGE_DIR is deliberately not passed: in the containers it is always
   # /app/storage, the bind mount below.
@@ -138,6 +140,7 @@ services:
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-}
       MAX_SOUND_EFFECT_MB: ${MAX_SOUND_EFFECT_MB:-}
       MAX_SOUND_EFFECTS_PER_USER: ${MAX_SOUND_EFFECTS_PER_USER:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
       MAX_ACTIVE_JOBS_PER_USER: ${MAX_ACTIVE_JOBS_PER_USER:-}
       RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-}
       LOGIN_RATE_LIMIT_PER_MINUTE: ${LOGIN_RATE_LIMIT_PER_MINUTE:-}
@@ -149,6 +152,13 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    healthcheck:
+      # GET /health: 200 only when Postgres and Redis both answer.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
 
   s3:
     # S3-compatible object storage for local development (SeaweedFS), for

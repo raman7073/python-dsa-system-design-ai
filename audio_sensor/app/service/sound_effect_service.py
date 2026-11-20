@@ -13,7 +13,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, or_, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.config import get_api_settings
+from app.audio_probe import header_duration
+from app.config import get_api_settings, settings
 from app.database.models import AudioFile, AudioStatus, SoundEffect, User
 from app.storage import (
     SOUND_EFFECT_SUFFIXES,
@@ -33,11 +34,11 @@ class SoundEffectNotFoundError(LookupError):
 
 
 class InvalidSoundEffectError(ValueError):
-    """A bad name or file type."""
+    """A bad name, file type, or content (not audio, or too long)."""
 
 
 class SoundEffectNameTakenError(ValueError):
-    """The user already has a sound effect with this name."""
+    """The user already has a sound effect with this name (ignoring case)."""
 
 
 class TooManySoundEffectsError(RuntimeError):
@@ -90,6 +91,15 @@ class SoundEffectService:
             raise InvalidSoundEffectError(
                 f"Sound effects must be one of: {', '.join(SOUND_EFFECT_SUFFIXES)}"
             )
+        # The content too, not just the extension: real audio, and short.
+        duration = await asyncio.to_thread(header_duration, data, suffix)
+        if duration is None:
+            raise InvalidSoundEffectError(f"The file isn't readable as {suffix} audio")
+        if duration > settings.MAX_SOUND_EFFECT_SECONDS:
+            raise InvalidSoundEffectError(
+                f"Sound effects can be at most {settings.MAX_SOUND_EFFECT_SECONDS} seconds "
+                f"(this one is {duration:.0f})"
+            )
 
         # As with audio uploads: quick checks first, then no connection or
         # lock is held while the file is stored.
@@ -122,7 +132,9 @@ class SoundEffectService:
         if (count or 0) >= self.max_per_user:
             raise TooManySoundEffectsError(self.max_per_user)
         taken = await self.session.scalar(
-            select(SoundEffect.id).where(SoundEffect.user_id == owner_id, SoundEffect.name == name)
+            select(SoundEffect.id).where(
+                SoundEffect.user_id == owner_id, func.lower(SoundEffect.name) == name.lower()
+            )
         )
         if taken is not None:
             raise SoundEffectNameTakenError(f"You already have a sound effect called {name!r}")
